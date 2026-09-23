@@ -1461,7 +1461,7 @@ client.on("messageCreate", async message => {
   // ===============================
 
   return message.reply(
-    `❌ Unknown command. Use **@${client.user.username} help** :cat~1:`
+    `❌ Unknown command. Use **@${client.user.username} help** `
   );
 });
 
