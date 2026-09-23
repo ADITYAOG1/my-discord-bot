@@ -924,5 +924,12 @@ client.on(
           warnings
         );
 
-        return message.reply(
-          `Clear
+        saveJson(
+  WARN_FILE,
+  warnings
+);
+
+       return message.reply(
+  `Cleared all warnings for ${user}.`
+);
+      }
