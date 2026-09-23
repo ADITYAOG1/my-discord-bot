@@ -1,6 +1,9 @@
+const { MongoClient } = require('mongodb');
 
-const fs = require('fs');
-const path = require('path');
+// Tiny web server so Render sees an open port
+require('http')
+  .createServer((req, res) => res.end('Bot is running'))
+  .listen(process.env.PORT || 3000);
 const {
   Client,
   GatewayIntentBits,
@@ -19,12 +22,22 @@ const client = new Client({
 });
 
 /* ---------------- storage ---------------- */
-const DB_FILE = path.join(__dirname, 'data.json');
 let db = { warns: {}, tempbans: [] };
-try {
-  db = { ...db, ...JSON.parse(fs.readFileSync(DB_FILE, 'utf8')) };
-} catch {}
-const save = () => fs.writeFileSync(DB_FILE, JSON.stringify(db, null, 2));
+let col;
+
+async function initDB() {
+  const mongo = new MongoClient(process.env.MONGO_URI);
+  await mongo.connect();
+  col = mongo.db('modbot').collection('data');
+  const doc = await col.findOne({ _id: 'main' });
+  if (doc) db = { warns: doc.warns || {}, tempbans: doc.tempbans || [] };
+  console.log('Database connected');
+}
+
+const save = () =>
+  col
+    .replaceOne({ _id: 'main' }, { _id: 'main', ...db }, { upsert: true })
+    .catch((e) => console.error('DB save failed:', e.message));
 
 /* ---------------- constants ---------------- */
 const MIN = 60e3, HOUR = 60 * MIN, DAY = 24 * HOUR;
@@ -426,4 +439,10 @@ setInterval(async () => {
   }
 }, 30 * 1000);
 
-client.login(process.env.DISCORD_TOKEN);
+initDB()
+  .then(() => client.login(process.env.TOKEN))
+  .catch((e) => {
+    console.error('Startup failed:', e.message);
+    process.exit(1);
+  });
+      
