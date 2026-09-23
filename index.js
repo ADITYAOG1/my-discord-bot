@@ -440,9 +440,9 @@ setInterval(async () => {
 }, 30 * 1000);
 
 initDB()
-  .then(() => client.login(process.env.TOKEN))
+  .then(() => client.login(process.env.DISCORD_TOKEN))
   .catch((e) => {
     console.error('Startup failed:', e.message);
     process.exit(1);
   });
-      
+        
