@@ -1,688 +1,1238 @@
 const {
   Client,
   GatewayIntentBits,
-  PermissionsBitField,
-  EmbedBuilder
+  PermissionsBitField
 } = require("discord.js");
 
-const http = require("http");
 const fs = require("fs");
+const http = require("http");
 
-// =========================
-// BOT SETUP
-// =========================
+// ===============================
+// CLIENT
+// ===============================
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers
   ]
 });
 
-// =========================
-// RENDER WEB SERVER
-// =========================
+// ===============================
+// CONFIG
+// ===============================
+
+const PREFIX = "@Bot";
+const MOD_LOG_CHANNEL_ID = "1547632399620382811";
 
 const PORT = process.env.PORT || 3000;
 
+// ===============================
+// FILE STORAGE
+// ===============================
+
+const WARN_FILE = "./warnings.json";
+const RULE_FILE = "./rules.json";
+
+if (!fs.existsSync(WARN_FILE)) {
+  fs.writeFileSync(WARN_FILE, "{}");
+}
+
+if (!fs.existsSync(RULE_FILE)) {
+  fs.writeFileSync(RULE_FILE, "{}");
+}
+
+let warnings = JSON.parse(fs.readFileSync(WARN_FILE, "utf8"));
+let rules = JSON.parse(fs.readFileSync(RULE_FILE, "utf8"));
+
+function saveWarnings() {
+  fs.writeFileSync(WARN_FILE, JSON.stringify(warnings, null, 2));
+}
+
+function saveRules() {
+  fs.writeFileSync(RULE_FILE, JSON.stringify(rules, null, 2));
+}
+
+// ===============================
+// RENDER WEB SERVER
+// ===============================
+
 http.createServer((req, res) => {
-  res.writeHead(200);
+  res.writeHead(200, {
+    "Content-Type": "text/plain"
+  });
+
   res.end("Bot is online!");
 }).listen(PORT, () => {
   console.log(`Web server running on port ${PORT}`);
 });
 
-// =========================
-// DATA STORAGE
-// =========================
-
-const warningsFile = "./warnings.json";
-const rulesFile = "./rules.json";
-
-if (!fs.existsSync(warningsFile)) {
-  fs.writeFileSync(warningsFile, "{}");
-}
-
-if (!fs.existsSync(rulesFile)) {
-  fs.writeFileSync(rulesFile, "{}");
-}
-
-let warnings = JSON.parse(fs.readFileSync(warningsFile, "utf8"));
-let rules = JSON.parse(fs.readFileSync(rulesFile, "utf8"));
-
-function saveWarnings() {
-  fs.writeFileSync(warningsFile, JSON.stringify(warnings, null, 2));
-}
-
-function saveRules() {
-  fs.writeFileSync(rulesFile, JSON.stringify(rules, null, 2));
-}
-
-// =========================
+// ===============================
 // READY
-// =========================
+// ===============================
 
 client.once("ready", () => {
   console.log(`Logged in as ${client.user.tag}`);
+
+  client.user.setPresence({
+    status: "dnd",
+    activities: [
+      {
+        name: "@Bot help",
+        type: 0
+      }
+    ]
+  });
 });
 
-// =========================
-// HELPER FUNCTIONS
-// =========================
+// ===============================
+// MOD LOG
+// ===============================
 
-function getUserFromMessage(message) {
-  return message.mentions.users.first();
+async function modLog(guild, title, description) {
+  try {
+    const channel = guild.channels.cache.get(MOD_LOG_CHANNEL_ID);
+
+    if (!channel) return;
+
+    await channel.send(
+      `📋 **${title}**\n${description}`
+    );
+  } catch (error) {
+    console.log("Mod-log error:", error.message);
+  }
+}
+
+// ===============================
+// HELPERS
+// ===============================
+
+function removeMentionArguments(args) {
+  return args.filter(arg => !/^<@!?\d+>$/.test(arg));
 }
 
 function getReason(args) {
-  return args.join(" ").trim() || "No reason provided";
+  const cleanArgs = removeMentionArguments(args);
+
+  return cleanArgs.join(" ").trim() || "No reason provided";
 }
 
-function parseDuration(time) {
-  if (!time) return null;
-
-  const match = time.match(/^(\d+)(s|m|h|d|w)$/i);
-
-  if (!match) return null;
-
-  const amount = parseInt(match[1]);
-  const unit = match[2].toLowerCase();
-
-  const multipliers = {
-    s: 1000,
-    m: 60 * 1000,
-    h: 60 * 60 * 1000,
-    d: 24 * 60 * 60 * 1000,
-    w: 7 * 24 * 60 * 60 * 1000
-  };
-
-  return amount * multipliers[unit];
+function getTarget(message) {
+  return message.mentions.members.first();
 }
 
-function durationText(ms) {
-  const seconds = Math.floor(ms / 1000);
-
-  if (seconds < 60) return `${seconds}s`;
-
-  const minutes = Math.floor(seconds / 60);
-
-  if (minutes < 60) return `${minutes}m`;
-
-  const hours = Math.floor(minutes / 60);
-
-  if (hours < 24) return `${hours}h`;
-
-  const days = Math.floor(hours / 24);
-
-  return `${days}d`;
+function getUserKey(guildId, userId) {
+  return `${guildId}_${userId}`;
 }
 
-function hasPermission(message, permission) {
-  return message.member?.permissions.has(permission);
-}
+// ===============================
+// AUTOMATIC WARNING PUNISHMENTS
+// ===============================
 
-function moderationEmbed(title, description) {
-  return new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(description)
-    .setTimestamp();
-}
-
-// =========================
-// MESSAGE COMMAND SYSTEM
-// =========================
-
-client.on("messageCreate", async (message) => {
+async function applyWarningPunishment(message, member, count, reason) {
   try {
-    if (message.author.bot) return;
 
-    const mention1 = `<@${client.user.id}>`;
-    const mention2 = `<@!${client.user.id}>`;
-
-    if (
-      !message.content.startsWith(mention1) &&
-      !message.content.startsWith(mention2)
-    ) {
-      return;
-    }
-
-    let commandText = message.content
-      .replace(mention1, "")
-      .replace(mention2, "")
-      .trim();
-
-    if (!commandText) {
-      return message.reply("👋 Use `@Bot help` to see my commands.");
-    }
-
-    const args = commandText.split(/\s+/);
-    const command = args.shift().toLowerCase();
-
-    // =========================
-    // HELP
-    // =========================
-
-    if (command === "help") {
-      const embed = new EmbedBuilder()
-        .setTitle("📖 Bot Commands")
-        .setDescription(
-          "**🛡️ Moderation**\n" +
-          "`@Bot warn @user reason`\n" +
-          "`@Bot warns @user`\n" +
-          "`@Bot deletewarn @user number`\n" +
-          "`@Bot clearwarns @user`\n" +
-          "`@Bot warns leaderboard`\n" +
-          "`@Bot purge 50`\n" +
-          "`@Bot timeout @user 10m reason`\n" +
-          "`@Bot untimeout @user`\n" +
-          "`@Bot kick @user reason`\n" +
-          "`@Bot ban @user reason`\n" +
-          "`@Bot unban userID`\n\n" +
-
-          "**📜 Rules**\n" +
-          "`@Bot setrule number text`\n" +
-          "`@Bot delrule number`\n" +
-          "`@Bot rules`\n\n" +
-
-          "**🔧 Utility**\n" +
-          "`@Bot ping`\n" +
-          "`@Bot help`"
-        )
-        .setFooter({ text: "Moderation system" })
-        .setTimestamp();
-
-      return message.reply({ embeds: [embed] });
-    }
-
-    // =========================
-    // PING
-    // =========================
-
-    if (command === "ping") {
-      return message.reply(`🏓 Pong! **${client.ws.ping}ms**`);
-    }
-
-    // =========================
-    // WARN
-    // =========================
-
-    if (command === "warn") {
-      if (!hasPermission(message, PermissionsBitField.Flags.ModerateMembers)) {
-        return message.reply("❌ You don't have permission to warn members.");
-      }
-
-      const user = getUserFromMessage(message);
-
-      if (!user) {
-        return message.reply("❌ Mention a user.\nExample: `@Bot warn @user spam`");
-      }
-
-      if (user.id === message.author.id) {
-        return message.reply("❌ You can't warn yourself.");
-      }
-
-      const reason = getReason(args);
-
-      if (!warnings[message.guild.id]) {
-        warnings[message.guild.id] = {};
-      }
-
-      if (!warnings[message.guild.id][user.id]) {
-        warnings[message.guild.id][user.id] = [];
-      }
-
-      warnings[message.guild.id][user.id].push({
-        reason: reason,
-        moderator: message.author.id,
-        date: new Date().toISOString()
-      });
-
-      saveWarnings();
-
-      const count = warnings[message.guild.id][user.id].length;
-
-      return message.reply({
-        embeds: [
-          moderationEmbed(
-            "⚠️ Member Warned",
-            `**User:** ${user}\n**Reason:** ${reason}\n**Warnings:** ${count}\n**Moderator:** ${message.author}`
-          )
-        ]
-      });
-    }
-
-    // =========================
-    // WARNS
-    // =========================
-
-    if (command === "warns") {
-      // Leaderboard
-      if (args[0]?.toLowerCase() === "leaderboard") {
-        const guildWarnings = warnings[message.guild.id] || {};
-
-        const leaderboard = Object.entries(guildWarnings)
-          .map(([userId, list]) => ({
-            userId,
-            count: list.length
-          }))
-          .sort((a, b) => b.count - a.count)
-          .slice(0, 10);
-
-        if (leaderboard.length === 0) {
-          return message.reply("📊 There are no warnings yet.");
-        }
-
-        let text = "";
-
-        for (let i = 0; i < leaderboard.length; i++) {
-          text += `**${i + 1}.** <@${leaderboard[i].userId}> — **${leaderboard[i].count}** warnings\n`;
-        }
-
-        return message.reply({
-          embeds: [
-            moderationEmbed("🏆 Warning Leaderboard", text)
-          ]
-        });
-      }
-
-      if (!hasPermission(message, PermissionsBitField.Flags.ModerateMembers)) {
-        return message.reply("❌ You don't have permission to view warnings.");
-      }
-
-      const user = getUserFromMessage(message);
-
-      if (!user) {
-        return message.reply("❌ Mention a user.");
-      }
-
-      const list =
-        warnings[message.guild.id]?.[user.id] || [];
-
-      if (list.length === 0) {
-        return message.reply(`✅ ${user} has no warnings.`);
-      }
-
-      let text = "";
-
-      list.forEach((warning, index) => {
-        const date = new Date(warning.date).toLocaleDateString();
-
-        text +=
-          `**${index + 1}.** ${warning.reason}\n` +
-          `Moderator: <@${warning.moderator}> • ${date}\n\n`;
-      });
-
-      return message.reply({
-        embeds: [
-          moderationEmbed(
-            `⚠️ Warnings — ${user.username}`,
-            text
-          )
-        ]
-      });
-    }
-
-    // =========================
-    // DELETE WARN
-    // =========================
-
-    if (command === "deletewarn") {
-      if (!hasPermission(message, PermissionsBitField.Flags.ModerateMembers)) {
-        return message.reply("❌ You don't have permission.");
-      }
-
-      const user = getUserFromMessage(message);
-      const number = parseInt(args.find(arg => /^\d+$/.test(arg)));
-
-      if (!user || !number) {
-        return message.reply(
-          "❌ Usage: `@Bot deletewarn @user number`"
-        );
-      }
-
-      const list = warnings[message.guild.id]?.[user.id];
-
-      if (!list || list.length === 0) {
-        return message.reply("❌ This user has no warnings.");
-      }
-
-      if (number < 1 || number > list.length) {
-        return message.reply("❌ Invalid warning number.");
-      }
-
-      list.splice(number - 1, 1);
-
-      saveWarnings();
-
-      return message.reply(`✅ Warning **#${number}** deleted from ${user}.`);
-    }
-
-    // =========================
-    // CLEAR WARNS
-    // =========================
-
-    if (command === "clearwarns") {
-      if (!hasPermission(message, PermissionsBitField.Flags.ModerateMembers)) {
-        return message.reply("❌ You don't have permission.");
-      }
-
-      const user = getUserFromMessage(message);
-
-      if (!user) {
-        return message.reply("❌ Mention a user.");
-      }
-
-      if (warnings[message.guild.id]) {
-        delete warnings[message.guild.id][user.id];
-      }
-
-      saveWarnings();
-
-      return message.reply(`✅ All warnings for ${user} have been cleared.`);
-    }
-
-    // =========================
-    // PURGE
-    // =========================
-
-    if (command === "purge") {
-      if (!hasPermission(message, PermissionsBitField.Flags.ManageMessages)) {
-        return message.reply("❌ You don't have permission to purge messages.");
-      }
-
-      const amount = parseInt(args[0]);
-
-      if (!amount || amount < 1 || amount > 100) {
-        return message.reply("❌ Choose a number between **1 and 100**.");
-      }
-
-      const deleted = await message.channel.bulkDelete(amount, true);
-
-      const response = await message.channel.send(
-        `🧹 Deleted **${deleted.size}** messages.`
+    // 3 WARNINGS = 10 MIN TIMEOUT
+    if (count === 3) {
+      await member.timeout(
+        10 * 60 * 1000,
+        "Reached 3 warnings"
       );
 
-      setTimeout(() => {
-        response.delete().catch(() => {});
-      }, 3000);
-
-      return;
-    }
-
-    // =========================
-    // TIMEOUT
-    // =========================
-
-    if (command === "timeout") {
-      if (!hasPermission(message, PermissionsBitField.Flags.ModerateMembers)) {
-        return message.reply("❌ You don't have permission to timeout members.");
-      }
-
-      const user = getUserFromMessage(message);
-
-      if (!user) {
-        return message.reply("❌ Mention a user.");
-      }
-
-      const durationArg = args.find(arg =>
-        /^\d+(s|m|h|d|w)$/i.test(arg)
+      await message.channel.send(
+        `⏱️ ${member} has been **timed out for 10 minutes** for reaching **3 warnings**.`
       );
 
-      const duration = parseDuration(durationArg);
-
-      if (!durationArg || !duration) {
-        return message.reply(
-          "❌ Give a valid duration.\nExample: `10m`, `2h`, `1d`"
-        );
-      }
-
-      const member = await message.guild.members.fetch(user.id).catch(() => null);
-
-      if (!member) {
-        return message.reply("❌ I couldn't find that member.");
-      }
-
-      const reasonArgs = args.filter(arg => arg !== durationArg);
-      const reason = getReason(reasonArgs);
-
-      await member.timeout(duration, reason);
-
-      return message.reply({
-        embeds: [
-          moderationEmbed(
-            "⏳ Member Timed Out",
-            `**User:** ${user}\n**Duration:** ${durationText(duration)}\n**Reason:** ${reason}\n**Moderator:** ${message.author}`
-          )
-        ]
-      });
+      await modLog(
+        message.guild,
+        "Automatic Punishment",
+        `${member} was timed out for **10 minutes** after reaching **3 warnings**.\nReason: ${reason}`
+      );
     }
 
-    // =========================
-    // UNTIMEOUT
-    // =========================
+    // 5 WARNINGS = 30 MIN TIMEOUT
+    else if (count === 5) {
+      await member.timeout(
+        30 * 60 * 1000,
+        "Reached 5 warnings"
+      );
 
-    if (command === "untimeout") {
-      if (!hasPermission(message, PermissionsBitField.Flags.ModerateMembers)) {
-        return message.reply("❌ You don't have permission.");
-      }
+      await message.channel.send(
+        `⏱️ ${member} has been **timed out for 30 minutes** for reaching **5 warnings**.`
+      );
 
-      const user = getUserFromMessage(message);
-
-      if (!user) {
-        return message.reply("❌ Mention a user.");
-      }
-
-      const member = await message.guild.members.fetch(user.id).catch(() => null);
-
-      if (!member) {
-        return message.reply("❌ Member not found.");
-      }
-
-      await member.timeout(null, "Timeout removed");
-
-      return message.reply(`✅ Timeout removed from ${user}.`);
+      await modLog(
+        message.guild,
+        "Automatic Punishment",
+        `${member} was timed out for **30 minutes** after reaching **5 warnings**.\nReason: ${reason}`
+      );
     }
 
-    // =========================
-    // KICK
-    // =========================
+    // 8 WARNINGS = 24 HOUR TIMEOUT
+    else if (count === 8) {
+      await member.timeout(
+        24 * 60 * 60 * 1000,
+        "Reached 8 warnings"
+      );
 
-    if (command === "kick") {
-      if (!hasPermission(message, PermissionsBitField.Flags.KickMembers)) {
-        return message.reply("❌ You don't have permission to kick members.");
-      }
+      await message.channel.send(
+        `⏱️ ${member} has been **timed out for 24 hours** for reaching **8 warnings**.`
+      );
 
-      const user = getUserFromMessage(message);
-
-      if (!user) {
-        return message.reply("❌ Mention a user.");
-      }
-
-      const member = await message.guild.members.fetch(user.id).catch(() => null);
-
-      if (!member) {
-        return message.reply("❌ Member not found.");
-      }
-
-      if (!member.kickable) {
-        return message.reply("❌ I can't kick this member.");
-      }
-
-      const reason = getReason(args);
-
-      await member.kick(reason);
-
-      return message.reply({
-        embeds: [
-          moderationEmbed(
-            "👢 Member Kicked",
-            `**User:** ${user}\n**Reason:** ${reason}\n**Moderator:** ${message.author}`
-          )
-        ]
-      });
+      await modLog(
+        message.guild,
+        "Automatic Punishment",
+        `${member} was timed out for **24 hours** after reaching **8 warnings**.\nReason: ${reason}`
+      );
     }
 
-    // =========================
-    // BAN
-    // =========================
-
-    if (command === "ban") {
-      if (!hasPermission(message, PermissionsBitField.Flags.BanMembers)) {
-        return message.reply("❌ You don't have permission to ban members.");
-      }
-
-      const user = getUserFromMessage(message);
-
-      if (!user) {
-        return message.reply("❌ Mention a user.");
-      }
-
-      const member = await message.guild.members.fetch(user.id).catch(() => null);
-
-      if (member && !member.bannable) {
-        return message.reply("❌ I can't ban this member.");
-      }
-
-      const reason = getReason(args);
-
-      await message.guild.members.ban(user.id, {
-        reason: reason
+    // 10 WARNINGS = 1 WEEK BAN
+    else if (count === 10) {
+      await member.ban({
+        deleteMessageSeconds: 0,
+        reason: "Reached 10 warnings"
       });
 
-      return message.reply({
-        embeds: [
-          moderationEmbed(
-            "🔨 Member Banned",
-            `**User:** ${user}\n**Reason:** ${reason}\n**Moderator:** ${message.author}`
-          )
-        ]
+      await message.channel.send(
+        `🔨 ${member.user.tag} has been **banned for 1 week** for reaching **10 warnings**.`
+      );
+
+      await modLog(
+        message.guild,
+        "Automatic Punishment",
+        `${member.user.tag} was banned for **1 week** after reaching **10 warnings**.\nReason: ${reason}`
+      );
+
+      // Schedule unban after 1 week
+      setTimeout(async () => {
+        try {
+          await message.guild.members.unban(
+            member.id,
+            "1 week warning punishment completed"
+          );
+
+          await modLog(
+            message.guild,
+            "Automatic Unban",
+            `${member.user.tag} was automatically unbanned after the **1 week** punishment.`
+          );
+        } catch (error) {
+          console.log("Automatic unban error:", error.message);
+        }
+      }, 7 * 24 * 60 * 60 * 1000);
+    }
+
+    // 12 WARNINGS = 3 WEEK BAN
+    else if (count === 12) {
+      await member.ban({
+        deleteMessageSeconds: 0,
+        reason: "Reached 12 warnings"
       });
+
+      await message.channel.send(
+        `🔨 ${member.user.tag} has been **banned for 3 weeks** for reaching **12 warnings**.`
+      );
+
+      await modLog(
+        message.guild,
+        "Automatic Punishment",
+        `${member.user.tag} was banned for **3 weeks** after reaching **12 warnings**.\nReason: ${reason}`
+      );
+
+      // Schedule unban after 3 weeks
+      setTimeout(async () => {
+        try {
+          await message.guild.members.unban(
+            member.id,
+            "3 week warning punishment completed"
+          );
+
+          await modLog(
+            message.guild,
+            "Automatic Unban",
+            `${member.user.tag} was automatically unbanned after the **3 week** punishment.`
+          );
+        } catch (error) {
+          console.log("Automatic unban error:", error.message);
+        }
+      }, 21 * 24 * 60 * 60 * 1000);
     }
 
-    // =========================
-    // UNBAN
-    // =========================
-
-    if (command === "unban") {
-      if (!hasPermission(message, PermissionsBitField.Flags.BanMembers)) {
-        return message.reply("❌ You don't have permission to unban members.");
-      }
-
-      const userId = args[0];
-
-      if (!userId) {
-        return message.reply(
-          "❌ Usage: `@Bot unban userID`"
-        );
-      }
-
-      const reason = getReason(args.slice(1));
-
-      await message.guild.members.unban(userId, reason);
-
-      return message.reply(`✅ User **${userId}** has been unbanned.`);
-    }
-
-    // =========================
-    // SET RULE
-    // =========================
-
-    if (command === "setrule") {
-      if (!hasPermission(message, PermissionsBitField.Flags.ManageGuild)) {
-        return message.reply("❌ You need Manage Server permission.");
-      }
-
-      const number = parseInt(args.shift());
-
-      if (!number || number < 1) {
-        return message.reply("❌ Give a valid rule number.");
-      }
-
-      const text = args.join(" ");
-
-      if (!text) {
-        return message.reply(
-          "❌ Example: `@Bot setrule 1 Be respectful`"
-        );
-      }
-
-      if (!rules[message.guild.id]) {
-        rules[message.guild.id] = {};
-      }
-
-      rules[message.guild.id][number] = text;
-
-      saveRules();
-
-      return message.reply(`✅ Rule **${number}** has been set.`);
-    }
-
-    // =========================
-    // DELETE RULE
-    // =========================
-
-    if (command === "delrule") {
-      if (!hasPermission(message, PermissionsBitField.Flags.ManageGuild)) {
-        return message.reply("❌ You need Manage Server permission.");
-      }
-
-      const number = parseInt(args[0]);
-
-      if (!number) {
-        return message.reply("❌ Give a rule number.");
-      }
-
-      if (!rules[message.guild.id]?.[number]) {
-        return message.reply("❌ That rule doesn't exist.");
-      }
-
-      delete rules[message.guild.id][number];
-
-      saveRules();
-
-      return message.reply(`✅ Rule **${number}** deleted.`);
-    }
-
-    // =========================
-    // RULES
-    // =========================
-
-    if (command === "rules") {
-      const guildRules = rules[message.guild.id] || {};
-
-      const numbers = Object.keys(guildRules)
-        .sort((a, b) => Number(a) - Number(b));
-
-      if (numbers.length === 0) {
-        return message.reply("📜 No rules have been configured yet.");
-      }
-
-      let text = "";
-
-      for (const number of numbers) {
-        text += `**${number}.** ${guildRules[number]}\n`;
-      }
-
-      return message.reply({
-        embeds: [
-          moderationEmbed("📜 Server Rules", text)
-        ]
+    // 15 WARNINGS = PERMANENT BAN
+    else if (count === 15) {
+      await member.ban({
+        deleteMessageSeconds: 0,
+        reason: "Reached 15 warnings - permanent ban"
       });
+
+      await message.channel.send(
+        `🔨 ${member.user.tag} has been **permanently banned** for reaching **15 warnings**.`
+      );
+
+      await modLog(
+        message.guild,
+        "Automatic Punishment",
+        `${member.user.tag} was **permanently banned** after reaching **15 warnings**.\nReason: ${reason}`
+      );
     }
 
   } catch (error) {
-    console.error(error);
+    console.log("Automatic punishment error:", error.message);
 
-    if (!message.replied && !message.deferred) {
-      message.reply("❌ Something went wrong while running that command.")
-        .catch(() => {});
-    }
+    await message.channel.send(
+      `⚠️ I couldn't apply the automatic punishment. Check my permissions and role position.`
+    );
   }
+}
+
+// ===============================
+// MESSAGE COMMANDS
+// ===============================
+
+client.on("messageCreate", async message => {
+
+  if (message.author.bot) return;
+
+  if (!message.guild) return;
+
+  const content = message.content.trim();
+
+  if (!content.toLowerCase().startsWith(PREFIX.toLowerCase())) {
+    return;
+  }
+
+  const args = content.slice(PREFIX.length).trim().split(/\s+/);
+
+  const command = args.shift()?.toLowerCase();
+
+  if (!command) return;
+
+  // ===============================
+  // PING
+  // ===============================
+
+  if (command === "ping") {
+    return message.reply("Heyyyyy!!! :cat~1:");
+  }
+
+  // ===============================
+  // HELP
+  // ===============================
+
+  if (command === "help") {
+
+    return message.reply(
+`📚 **Caffeine Commands**
+
+**General**
+> @Bot ping :Verify:
+> @Bot help :Verify:
+> @Bot userinfo @user :Verify:
+> @Bot serverinfo :Verify:
+
+**Warnings**
+> @Bot warn @user reason :Verify:
+> @Bot warns @user :Verify:
+> @Bot deletewarn @user number :Verify:
+> @Bot clearwarns @user :Verify:
+> @Bot warns leaderboard :Verify:
+
+**Moderation**
+> @Bot purge amount :Verify:
+> @Bot timeout @user duration reason :Verify:
+> @Bot untimeout @user :Verify:
+> @Bot kick @user reason :Verify:
+> @Bot ban @user reason :Verify:
+> @Bot unban userID :Verify:
+
+**Channels**
+> @Bot lock :Verify:
+> @Bot unlock :Verify:
+> @Bot slowmode seconds :Verify:
+
+**Roles**
+> @Bot addrole @user role :Verify:
+> @Bot removerole @user role :Verify:
+
+**Nickname**
+> @Bot nick @user nickname :Verify:
+
+**Rules**
+> @Bot setrule number text :Verify:
+> @Bot delrule number :Verify:
+> @Bot rules :Verify:`
+    );
+  }
+
+  // ===============================
+  // WARN
+  // ===============================
+
+  if (command === "warn") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ModerateMembers
+    )) {
+      return message.reply("❌ You don't have permission to warn members.");
+    }
+
+    const member = getTarget(message);
+
+    if (!member) {
+      return message.reply("❌ Mention a member.");
+    }
+
+    if (member.user.bot) {
+      return message.reply("❌ You cannot warn bots.");
+    }
+
+    const reason = getReason(args);
+
+    const key = getUserKey(
+      message.guild.id,
+      member.id
+    );
+
+    if (!warnings[key]) {
+      warnings[key] = [];
+    }
+
+    warnings[key].push({
+      reason,
+      moderator: message.author.id,
+      timestamp: Date.now()
+    });
+
+    saveWarnings();
+
+    const count = warnings[key].length;
+
+    await message.reply(
+      `📣 ${member} **HAS BEEN WARNED BY** ${message.author}\n${reason} **[#${count}]**`
+    );
+
+    await modLog(
+      message.guild,
+      "Member Warned",
+      `${member} was warned by ${message.author}\nReason: ${reason}\nWarnings: **#${count}**`
+    );
+
+    await applyWarningPunishment(
+      message,
+      member,
+      count,
+      reason
+    );
+
+    return;
+  }
+
+  // ===============================
+  // WARNS LEADERBOARD
+  // ===============================
+
+  if (
+    command === "warns" &&
+    args[0]?.toLowerCase() === "leaderboard"
+  ) {
+
+    const guildPrefix = `${message.guild.id}_`;
+
+    const leaderboard = Object.entries(warnings)
+      .filter(([key]) => key.startsWith(guildPrefix))
+      .map(([key, list]) => ({
+        userId: key.replace(guildPrefix, ""),
+        count: list.length
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 10);
+
+    if (leaderboard.length === 0) {
+      return message.reply("📊 No warnings recorded yet.");
+    }
+
+    let text = "🏆 **Warning Leaderboard**\n\n";
+
+    for (let i = 0; i < leaderboard.length; i++) {
+
+      const item = leaderboard[i];
+
+      text += `${i + 1}. <@${item.userId}> — **${item.count} warnings**\n`;
+    }
+
+    return message.reply(text);
+  }
+
+  // ===============================
+  // WARNS
+  // ===============================
+
+  if (command === "warns") {
+
+    const member = getTarget(message);
+
+    if (!member) {
+      return message.reply("❌ Mention a member.");
+    }
+
+    const key = getUserKey(
+      message.guild.id,
+      member.id
+    );
+
+    const list = warnings[key] || [];
+
+    if (list.length === 0) {
+      return message.reply(
+        `✅ ${member} has no warnings.`
+      );
+    }
+
+    let text = `⚠️ **Warnings for ${member.user.tag}**\n\n`;
+
+    list.forEach((warn, index) => {
+
+      const date = new Date(warn.timestamp)
+        .toLocaleDateString();
+
+      text += `**#${index + 1}** — ${warn.reason}\n`;
+      text += `Moderator: <@${warn.moderator}>\n`;
+      text += `Date: ${date}\n\n`;
+    });
+
+    return message.reply(text);
+  }
+
+  // ===============================
+  // DELETE WARNING
+  // ===============================
+
+  if (command === "deletewarn") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ModerateMembers
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const member = getTarget(message);
+
+    const number = parseInt(
+      args.find(arg => /^\d+$/.test(arg))
+    );
+
+    if (!member || !number) {
+      return message.reply(
+        "❌ Usage: `@Bot deletewarn @user number`"
+      );
+    }
+
+    const key = getUserKey(
+      message.guild.id,
+      member.id
+    );
+
+    if (!warnings[key] || !warnings[key][number - 1]) {
+      return message.reply("❌ That warning doesn't exist.");
+    }
+
+    const removed = warnings[key].splice(
+      number - 1,
+      1
+    )[0];
+
+    saveWarnings();
+
+    await message.reply(
+      `🗑️ Deleted warning **#${number}** from ${member}.`
+    );
+
+    await modLog(
+      message.guild,
+      "Warning Deleted",
+      `Warning **#${number}** for ${member} was deleted by ${message.author}.\nReason: ${removed.reason}`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // CLEAR WARNINGS
+  // ===============================
+
+  if (command === "clearwarns") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ModerateMembers
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const member = getTarget(message);
+
+    if (!member) {
+      return message.reply("❌ Mention a member.");
+    }
+
+    const key = getUserKey(
+      message.guild.id,
+      member.id
+    );
+
+    const oldCount = warnings[key]?.length || 0;
+
+    delete warnings[key];
+
+    saveWarnings();
+
+    await message.reply(
+      `🧹 Cleared **${oldCount} warnings** from ${member}.`
+    );
+
+    await modLog(
+      message.guild,
+      "Warnings Cleared",
+      `${oldCount} warnings were cleared from ${member} by ${message.author}.`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // PURGE / CLEAR
+  // ===============================
+
+  if (
+    command === "purge" ||
+    command === "clear"
+  ) {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ManageMessages
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const amount = parseInt(args[0]);
+
+    if (!amount || amount < 1 || amount > 100) {
+      return message.reply(
+        "❌ Enter a number between 1 and 100."
+      );
+    }
+
+    const deleted = await message.channel.bulkDelete(
+      amount + 1,
+      true
+    );
+
+    await message.channel.send(
+      `🧹 Deleted **${deleted.size - 1} messages**.`
+    );
+
+    await modLog(
+      message.guild,
+      "Messages Purged",
+      `${message.author} deleted **${deleted.size - 1} messages** in ${message.channel}.`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // TIMEOUT
+  // ===============================
+
+  if (command === "timeout") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ModerateMembers
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const member = getTarget(message);
+
+    if (!member) {
+      return message.reply("❌ Mention a member.");
+    }
+
+    const durationArg = args.find(
+      arg => /^\d+(s|m|h|d)$/i.test(arg)
+    );
+
+    if (!durationArg) {
+      return message.reply(
+        "❌ Example: `@Bot timeout @user 10m reason`"
+      );
+    }
+
+    const match = durationArg.match(
+      /^(\d+)(s|m|h|d)$/i
+    );
+
+    const value = parseInt(match[1]);
+    const unit = match[2].toLowerCase();
+
+    let ms;
+
+    if (unit === "s") ms = value * 1000;
+    if (unit === "m") ms = value * 60 * 1000;
+    if (unit === "h") ms = value * 60 * 60 * 1000;
+    if (unit === "d") ms = value * 24 * 60 * 60 * 1000;
+
+    const reason = getReason(args);
+
+    await member.timeout(ms, reason);
+
+    await message.reply(
+      `⏱️ ${member} has been timed out for **${durationArg}**.`
+    );
+
+    await modLog(
+      message.guild,
+      "Member Timed Out",
+      `${member} was timed out by ${message.author}.\nDuration: **${durationArg}**\nReason: ${reason}`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // UNTIMEOUT
+  // ===============================
+
+  if (
+    command === "untimeout" ||
+    command === "unmute"
+  ) {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ModerateMembers
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const member = getTarget(message);
+
+    if (!member) {
+      return message.reply("❌ Mention a member.");
+    }
+
+    await member.timeout(null);
+
+    await message.reply(
+      `🔊 ${member} has been **untimed out**.`
+    );
+
+    await modLog(
+      message.guild,
+      "Timeout Removed",
+      `${member} was untimed out by ${message.author}.`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // KICK
+  // ===============================
+
+  if (command === "kick") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.KickMembers
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const member = getTarget(message);
+
+    if (!member) {
+      return message.reply("❌ Mention a member.");
+    }
+
+    const reason = getReason(args);
+
+    const username = member.user.tag;
+
+    await member.kick(reason);
+
+    await message.reply(
+      `👢 **${username}** has been kicked.\nReason: ${reason}`
+    );
+
+    await modLog(
+      message.guild,
+      "Member Kicked",
+      `${username} was kicked by ${message.author}.\nReason: ${reason}`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // BAN
+  // ===============================
+
+  if (command === "ban") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.BanMembers
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const member = getTarget(message);
+
+    if (!member) {
+      return message.reply("❌ Mention a member.");
+    }
+
+    const reason = getReason(args);
+
+    const username = member.user.tag;
+
+    await member.ban({
+      deleteMessageSeconds: 0,
+      reason
+    });
+
+    await message.reply(
+      `🔨 **${username}** has been banned.\nReason: ${reason}`
+    );
+
+    await modLog(
+      message.guild,
+      "Member Banned",
+      `${username} was banned by ${message.author}.\nReason: ${reason}`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // UNBAN
+  // ===============================
+
+  if (command === "unban") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.BanMembers
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const userId = args[0];
+
+    if (!userId) {
+      return message.reply(
+        "❌ Usage: `@Bot unban userID`"
+      );
+    }
+
+    try {
+
+      const user = await client.users.fetch(userId);
+
+      await message.guild.members.unban(
+        userId,
+        `Unbanned by ${message.author.tag}`
+      );
+
+      await message.reply(
+        `🔓 **${user.tag}** has been unbanned.`
+      );
+
+      await modLog(
+        message.guild,
+        "Member Unbanned",
+        `${user.tag} was unbanned by ${message.author}.`
+      );
+
+    } catch {
+      return message.reply(
+        "❌ Could not unban that user."
+      );
+    }
+
+    return;
+  }
+
+  // ===============================
+  // LOCK
+  // ===============================
+
+  if (command === "lock") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ManageChannels
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    await message.channel.permissionOverwrites.edit(
+      message.guild.roles.everyone,
+      {
+        SendMessages: false
+      }
+    );
+
+    await message.reply(
+      "🔒 This channel has been **locked**."
+    );
+
+    await modLog(
+      message.guild,
+      "Channel Locked",
+      `${message.channel} was locked by ${message.author}.`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // UNLOCK
+  // ===============================
+
+  if (command === "unlock") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ManageChannels
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    await message.channel.permissionOverwrites.edit(
+      message.guild.roles.everyone,
+      {
+        SendMessages: null
+      }
+    );
+
+    await message.reply(
+      "🔓 This channel has been **unlocked**."
+    );
+
+    await modLog(
+      message.guild,
+      "Channel Unlocked",
+      `${message.channel} was unlocked by ${message.author}.`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // SLOWMODE
+  // ===============================
+
+  if (command === "slowmode") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ManageChannels
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const seconds = parseInt(args[0]);
+
+    if (
+      isNaN(seconds) ||
+      seconds < 0 ||
+      seconds > 21600
+    ) {
+      return message.reply(
+        "❌ Enter seconds between 0 and 21600."
+      );
+    }
+
+    await message.channel.setRateLimitPerUser(
+      seconds
+    );
+
+    await message.reply(
+      `🐌 Slowmode set to **${seconds} seconds**.`
+    );
+
+    await modLog(
+      message.guild,
+      "Slowmode Changed",
+      `${message.author} set slowmode in ${message.channel} to **${seconds} seconds**.`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // ADD ROLE
+  // ===============================
+
+  if (command === "addrole") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ManageRoles
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const member = getTarget(message);
+
+    if (!member) {
+      return message.reply("❌ Mention a member.");
+    }
+
+    const role = message.mentions.roles.first();
+
+    if (!role) {
+      return message.reply("❌ Mention a role.");
+    }
+
+    await member.roles.add(role);
+
+    await message.reply(
+      `✅ Added ${role} to ${member}.`
+    );
+
+    await modLog(
+      message.guild,
+      "Role Added",
+      `${message.author} added ${role} to ${member}.`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // REMOVE ROLE
+  // ===============================
+
+  if (
+    command === "removerole" ||
+    command === "delrole"
+  ) {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ManageRoles
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const member = getTarget(message);
+
+    if (!member) {
+      return message.reply("❌ Mention a member.");
+    }
+
+    const role = message.mentions.roles.first();
+
+    if (!role) {
+      return message.reply("❌ Mention a role.");
+    }
+
+    await member.roles.remove(role);
+
+    await message.reply(
+      `✅ Removed ${role} from ${member}.`
+    );
+
+    await modLog(
+      message.guild,
+      "Role Removed",
+      `${message.author} removed ${role} from ${member}.`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // NICKNAME
+  // ===============================
+
+  if (command === "nick") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ManageNicknames
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const member = getTarget(message);
+
+    if (!member) {
+      return message.reply("❌ Mention a member.");
+    }
+
+    const cleanArgs = removeMentionArguments(args);
+
+    const nickname = cleanArgs.join(" ").trim();
+
+    if (!nickname) {
+      return message.reply(
+        "❌ Enter a nickname."
+      );
+    }
+
+    await member.setNickname(nickname);
+
+    await message.reply(
+      `✏️ Changed ${member}'s nickname to **${nickname}**.`
+    );
+
+    await modLog(
+      message.guild,
+      "Nickname Changed",
+      `${message.author} changed ${member}'s nickname to **${nickname}**.`
+    );
+
+    return;
+  }
+
+  // ===============================
+  // USER INFO
+  // ===============================
+
+  if (command === "userinfo") {
+
+    const member =
+      getTarget(message) || message.member;
+
+    return message.reply(
+`👤 **User Information**
+
+**Username:** ${member.user.tag}
+**ID:** ${member.id}
+**Joined:** <t:${Math.floor(member.joinedTimestamp / 1000)}:R>
+**Account Created:** <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`
+    );
+  }
+
+  // ===============================
+  // SERVER INFO
+  // ===============================
+
+  if (command === "serverinfo") {
+
+    return message.reply(
+`🏠 **Server Information**
+
+**Server:** ${message.guild.name}
+**Members:** ${message.guild.memberCount}
+**Channels:** ${message.guild.channels.cache.size}
+**Roles:** ${message.guild.roles.cache.size}`
+    );
+  }
+
+  // ===============================
+  // SET RULE
+  // ===============================
+
+  if (command === "setrule") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ManageGuild
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const number = parseInt(args.shift());
+
+    const ruleText = args.join(" ").trim();
+
+    if (!number || !ruleText) {
+      return message.reply(
+        "❌ Usage: `@Bot setrule number rule text`"
+      );
+    }
+
+    if (!rules[message.guild.id]) {
+      rules[message.guild.id] = {};
+    }
+
+    rules[message.guild.id][number] = ruleText;
+
+    saveRules();
+
+    return message.reply(
+      `📜 Rule **${number}** has been set.`
+    );
+  }
+
+  // ===============================
+  // DELETE RULE
+  // ===============================
+
+  if (command === "delrule") {
+
+    if (!message.member.permissions.has(
+      PermissionsBitField.Flags.ManageGuild
+    )) {
+      return message.reply("❌ You don't have permission.");
+    }
+
+    const number = parseInt(args[0]);
+
+    if (!number) {
+      return message.reply(
+        "❌ Enter a rule number."
+      );
+    }
+
+    if (!rules[message.guild.id]?.[number]) {
+      return message.reply(
+        "❌ That rule doesn't exist."
+      );
+    }
+
+    delete rules[message.guild.id][number];
+
+    saveRules();
+
+    return message.reply(
+      `🗑️ Rule **${number}** deleted.`
+    );
+  }
+
+  // ===============================
+  // RULES
+  // ===============================
+
+  if (command === "rules") {
+
+    const serverRules =
+      rules[message.guild.id] || {};
+
+    const entries = Object.entries(serverRules)
+      .sort((a, b) => Number(a[0]) - Number(b[0]));
+
+    if (entries.length === 0) {
+      return message.reply(
+        "📜 No rules have been added yet."
+      );
+    }
+
+    let text = "📜 **Server Rules**\n\n";
+
+    for (const [number, rule] of entries) {
+      text += `**${number}.** ${rule}\n`;
+    }
+
+    return message.reply(text);
+  }
+
+  // ===============================
+  // UNKNOWN COMMAND
+  // ===============================
+
+  return message.reply(
+    `❌ Unknown command. Use **@Bot help** :cat~1:`
+  );
 });
 
-// =========================
+// ===============================
 // LOGIN
-// =========================
+// ===============================
 
 client.login(process.env.DISCORD_TOKEN);
