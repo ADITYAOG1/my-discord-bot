@@ -932,10 +932,339 @@ Account created: <t:${Math.floor(
     }
   }
 
-  // ====================================================
-  // LOCK
-  // ====================================================
-
   if (command === "lock") {
     if (
-      !message.me
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageChannels
+      )
+    ) {
+      return message.reply(
+        "You don't have permission."
+      );
+    }
+
+    try {
+      await message.channel.permissionOverwrites.edit(
+        message.guild.roles.everyone,
+        {
+          SendMessages: false
+        }
+      );
+
+      return message.reply("Channel locked.");
+    } catch {
+      return message.reply(
+        "I couldn't lock this channel."
+      );
+    }
+  }
+
+  if (command === "unlock") {
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageChannels
+      )
+    ) {
+      return message.reply(
+        "You don't have permission."
+      );
+    }
+
+    try {
+      await message.channel.permissionOverwrites.edit(
+        message.guild.roles.everyone,
+        {
+          SendMessages: null
+        }
+      );
+
+      return message.reply("Channel unlocked.");
+    } catch {
+      return message.reply(
+        "I couldn't unlock this channel."
+      );
+    }
+  }
+
+  if (command === "slowmode") {
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageChannels
+      )
+    ) {
+      return message.reply(
+        "You don't have permission."
+      );
+    }
+
+    const seconds = parseInt(args[0]);
+
+    if (
+      isNaN(seconds) ||
+      seconds < 0 ||
+      seconds > 21600
+    ) {
+      return message.reply(
+        "Use a number from 0 to 21600 seconds."
+      );
+    }
+
+    try {
+      await message.channel.setRateLimitPerUser(
+        seconds
+      );
+
+      return message.reply(
+        `Slowmode set to ${seconds} seconds.`
+      );
+    } catch {
+      return message.reply(
+        "I couldn't change slowmode."
+      );
+    }
+  }
+
+  if (command === "nick") {
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageNicknames
+      )
+    ) {
+      return message.reply(
+        "You don't have permission."
+      );
+    }
+
+    const member =
+      message.mentions.members.first();
+
+    if (!member) {
+      return message.reply(
+        "Usage: @myboy nick @user NewName"
+      );
+    }
+
+    const nickname =
+      args
+        .filter(
+          (x) => !/^<@!?\d+>$/.test(x)
+        )
+        .join(" ")
+        .trim();
+
+    if (!nickname) {
+      return message.reply(
+        "Give a nickname."
+      );
+    }
+
+    try {
+      await member.setNickname(nickname);
+
+      return message.reply(
+        `Changed ${member}'s nickname to ${nickname}.`
+      );
+    } catch {
+      return message.reply(
+        "I couldn't change that nickname."
+      );
+    }
+  }
+
+  if (command === "roleadd") {
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageRoles
+      )
+    ) {
+      return message.reply(
+        "You don't have permission."
+      );
+    }
+
+    const member =
+      message.mentions.members.first();
+
+    const role =
+      message.mentions.roles.first();
+
+    if (!member || !role) {
+      return message.reply(
+        "Usage: @myboy roleadd @user @role"
+      );
+    }
+
+    try {
+      await member.roles.add(role);
+
+      return message.reply(
+        `Added ${role} to ${member}.`
+      );
+    } catch {
+      return message.reply(
+        "I couldn't add that role. Check my role position."
+      );
+    }
+  }
+
+  if (command === "roleremove") {
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageRoles
+      )
+    ) {
+      return message.reply(
+        "You don't have permission."
+      );
+    }
+
+    const member =
+      message.mentions.members.first();
+
+    const role =
+      message.mentions.roles.first();
+
+    if (!member || !role) {
+      return message.reply(
+        "Usage: @myboy roleremove @user @role"
+      );
+    }
+
+    try {
+      await member.roles.remove(role);
+
+      return message.reply(
+        `Removed ${role} from ${member}.`
+      );
+    } catch {
+      return message.reply(
+        "I couldn't remove that role."
+      );
+    }
+  }
+
+  // =========================
+  // RULES
+  // =========================
+
+  if (command === "rules") {
+    const rules = loadFile(RULE_FILE);
+
+    const serverRules =
+      rules[message.guild.id] || {};
+
+    const numbers =
+      Object.keys(serverRules).sort(
+        (a, b) => Number(a) - Number(b)
+      );
+
+    if (!numbers.length) {
+      return message.reply(
+        "No rules have been added yet."
+      );
+    }
+
+    let text = "📜 **SERVER RULES**\n\n";
+
+    for (const number of numbers) {
+      text +=
+        `${number}. ${serverRules[number]}\n`;
+    }
+
+    return message.reply(
+      text.slice(0, 1900)
+    );
+  }
+
+  if (command === "setrule") {
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageGuild
+      )
+    ) {
+      return message.reply(
+        "You don't have permission."
+      );
+    }
+
+    const number =
+      parseInt(args.shift());
+
+    const text =
+      args.join(" ").trim();
+
+    if (!number || !text) {
+      return message.reply(
+        "Usage: @myboy setrule 1 Be respectful"
+      );
+    }
+
+    const rules = loadFile(RULE_FILE);
+
+    if (!rules[message.guild.id]) {
+      rules[message.guild.id] = {};
+    }
+
+    rules[message.guild.id][number] = text;
+
+    saveFile(RULE_FILE, rules);
+
+    return message.reply(
+      `Rule ${number} saved.`
+    );
+  }
+
+  if (command === "delrule") {
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageGuild
+      )
+    ) {
+      return message.reply(
+        "You don't have permission."
+      );
+    }
+
+    const number =
+      parseInt(args[0]);
+
+    if (!number) {
+      return message.reply(
+        "Usage: @myboy delrule 1"
+      );
+    }
+
+    const rules = loadFile(RULE_FILE);
+
+    if (
+      !rules[message.guild.id] ||
+      !rules[message.guild.id][number]
+    ) {
+      return message.reply(
+        "That rule doesn't exist."
+      );
+    }
+
+    delete rules[message.guild.id][number];
+
+    saveFile(RULE_FILE, rules);
+
+    return message.reply(
+      `Rule ${number} deleted.`
+    );
+  }
+
+  // =========================
+  // UNKNOWN COMMAND
+  // =========================
+
+  return message.reply(
+    `Unknown command. Use @${client.user.username} help`
+  );
+});
+
+// =========================
+// LOGIN
+// =========================
+
+client.login(process.env.DISCORD_TOKEN);
