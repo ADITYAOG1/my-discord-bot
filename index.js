@@ -1,935 +1,463 @@
 const {
   Client,
   GatewayIntentBits,
-  PermissionsBitField,
-  ActivityType
-} = require('discord.js');
+  Partials,
+  PermissionsBitField
+} = require("discord.js");
 
-const fs = require('fs');
-const http = require('http');
-
-// ============================================================
+// ===============================
 // CONFIG
-// ============================================================
+// ===============================
 
-const PORT = process.env.PORT || 3000;
-const VERIFY_EMOJI = '<:Verify:1552309376155656315>';
+const TOKEN = process.env.DISCORD_TOKEN || process.env.TOKEN;
 
-const WARN_FILE = './warnings.json';
-const RULE_FILE = './rules.json';
-const TEMPBAN_FILE = './tempbans.json';
+if (!TOKEN) {
+  console.error("❌ DISCORD_TOKEN environment variable is missing!");
+  process.exit(1);
+}
+
+// ===============================
+// CLIENT
+// ===============================
 
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
-  ]
+    GatewayIntentBits.MessageContent
+  ],
+  partials: [Partials.Channel]
 });
 
-// ============================================================
-// RENDER WEB SERVER
-// ============================================================
+// ===============================
+// WARN DATABASE
+// ===============================
 
-http.createServer((req, res) => {
-  res.writeHead(200, {
-    'Content-Type': 'text/plain'
-  });
+const warnings = new Map();
 
-  res.end('Bot is online!');
-}).listen(PORT, () => {
-  console.log(`Web server listening on port ${PORT}`);
-});
+// Get warnings for a user
+function getWarnings(guildId, userId) {
+  const key = `${guildId}-${userId}`;
 
-// ============================================================
-// FILE SYSTEM
-// ============================================================
-
-function ensureFile(file) {
-  if (!fs.existsSync(file)) {
-    fs.writeFileSync(file, '{}');
+  if (!warnings.has(key)) {
+    warnings.set(key, 0);
   }
+
+  return warnings.get(key);
 }
 
-ensureFile(WARN_FILE);
-ensureFile(RULE_FILE);
-ensureFile(TEMPBAN_FILE);
+// Set warnings
+function setWarnings(guildId, userId, amount) {
+  const key = `${guildId}-${userId}`;
+  warnings.set(key, amount);
+}
 
-function loadJson(file) {
+// ===============================
+// READY
+// ===============================
+
+client.once("ready", () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+  console.log("🤖 Caffeine moderation bot is online!");
+});
+
+// ===============================
+// MESSAGE HANDLER
+// ===============================
+
+client.on("messageCreate", async (message) => {
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
-  } catch (error) {
-    console.error(`Could not read ${file}:`, error.message);
-    return {};
-  }
-}
+    if (message.author.bot) return;
+    if (!message.guild) return;
 
-function saveJson(file, data) {
-  fs.writeFileSync(
-    file,
-    JSON.stringify(data, null, 2)
-  );
-}
+    // Prefix = bot mention
+    const mentionPrefix = `<@${client.user.id}>`;
+    const mentionPrefixNick = `<@!${client.user.id}>`;
 
-// ============================================================
-// PERMISSION HELPERS
-// ============================================================
+    let prefix = null;
 
-function isModerator(message, permission) {
-  return message.member?.permissions.has(permission);
-}
-
-// IMPORTANT:
-// This ignores the bot's own mention when finding the target.
-function targetMember(message) {
-  return (
-    message.mentions.members.find(
-      member => member.id !== client.user.id
-    ) || null
-  );
-}
-
-function targetUser(message) {
-  return (
-    message.mentions.users.find(
-      user => user.id !== client.user.id
-    ) || null
-  );
-}
-
-function cleanReason(args, durationArg = null) {
-  return args
-    .filter(
-      arg =>
-        arg !== durationArg &&
-        !/^<@!?\d+>$/.test(arg)
-    )
-    .join(' ')
-    .trim() || 'No reason provided';
-}
-
-function canActOn(message, member) {
-  if (!member) {
-    return 'Please mention a member.';
-  }
-
-  if (member.id === message.author.id) {
-    return 'You cannot use this command on yourself.';
-  }
-
-  if (member.id === client.user.id) {
-    return 'I cannot use moderation commands on myself.';
-  }
-
-  if (member.id === message.guild.ownerId) {
-    return 'The server owner cannot be moderated by the bot.';
-  }
-
-  if (!member.manageable) {
-    return (
-      'I cannot moderate that member because their highest role is equal to or higher than my highest role.'
-    );
-  }
-
-  return null;
-}
-
-// ============================================================
-// DURATION
-// ============================================================
-
-function durationToMs(input) {
-  const match = /^([0-9]+)(s|m|h|d)$/i.exec(
-    input || ''
-  );
-
-  if (!match) {
-    return null;
-  }
-
-  const amount = Number(match[1]);
-
-  const multiplier = {
-    s: 1000,
-    m: 60000,
-    h: 3600000,
-    d: 86400000
-  }[match[2].toLowerCase()];
-
-  return amount * multiplier;
-}
-
-// ============================================================
-// TEMP BAN SYSTEM
-// ============================================================
-
-const tempBanTimers = new Map();
-
-function clearTempBanTimer(guildId, userId) {
-  const key = `${guildId}:${userId}`;
-
-  const timer = tempBanTimers.get(key);
-
-  if (timer) {
-    clearTimeout(timer);
-  }
-
-  tempBanTimers.delete(key);
-}
-
-function saveTempBan(guildId, userId, unbanAt) {
-  const data = loadJson(TEMPBAN_FILE);
-
-  if (!data[guildId]) {
-    data[guildId] = {};
-  }
-
-  data[guildId][userId] = unbanAt;
-
-  saveJson(TEMPBAN_FILE, data);
-}
-
-function removeTempBan(guildId, userId) {
-  const data = loadJson(TEMPBAN_FILE);
-
-  if (data[guildId]) {
-    delete data[guildId][userId];
-
-    if (
-      Object.keys(data[guildId]).length === 0
-    ) {
-      delete data[guildId];
+    if (message.content.startsWith(mentionPrefix)) {
+      prefix = mentionPrefix;
+    } else if (message.content.startsWith(mentionPrefixNick)) {
+      prefix = mentionPrefixNick;
     }
 
-    saveJson(TEMPBAN_FILE, data);
-  }
-}
+    if (!prefix) return;
 
-function scheduleUnban(
-  guildId,
-  userId,
-  unbanAt
-) {
-  clearTempBanTimer(guildId, userId);
+    // Remove prefix
+    const content = message.content.slice(prefix.length).trim();
 
-  const delay = Math.max(
-    1000,
-    unbanAt - Date.now()
-  );
-
-  const timer = setTimeout(async () => {
-    try {
-      const guild =
-        await client.guilds.fetch(guildId);
-
-      await guild.members.unban(
-        userId,
-        'Temporary ban expired.'
-      );
-
-      removeTempBan(guildId, userId);
-
-      console.log(
-        `Automatically unbanned ${userId} in ${guildId}`
-      );
-    } catch (error) {
-      console.error(
-        `Automatic unban failed for ${userId}:`,
-        error.message
-      );
-    } finally {
-      tempBanTimers.delete(
-        `${guildId}:${userId}`
-      );
-    }
-  }, delay);
-
-  tempBanTimers.set(
-    `${guildId}:${userId}`,
-    timer
-  );
-}
-
-// ============================================================
-// AUTOMATIC WARNING PUNISHMENTS
-// ============================================================
-
-async function applyWarningPunishment(
-  member,
-  count
-) {
-  try {
-    // 3 WARNS = 10 MIN TIMEOUT
-    if (count === 3) {
-      if (!member.moderatable) {
-        return 'Could not apply the 10 minute timeout.';
-      }
-
-      await member.timeout(
-        10 * 60 * 1000,
-        'Reached 3 warnings.'
-      );
-
-      return '10 minute timeout';
-    }
-
-    // 5 WARNS = 30 MIN TIMEOUT
-    if (count === 5) {
-      if (!member.moderatable) {
-        return 'Could not apply the 30 minute timeout.';
-      }
-
-      await member.timeout(
-        30 * 60 * 1000,
-        'Reached 5 warnings.'
-      );
-
-      return '30 minute timeout';
-    }
-
-    // 8 WARNS = 24 HOUR TIMEOUT
-    if (count === 8) {
-      if (!member.moderatable) {
-        return 'Could not apply the 24 hour timeout.';
-      }
-
-      await member.timeout(
-        24 * 60 * 60 * 1000,
-        'Reached 8 warnings.'
-      );
-
-      return '24 hour timeout';
-    }
-
-    // 10 WARNS = 1 WEEK BAN
-    if (count === 10) {
-      if (!member.bannable) {
-        return 'Could not apply the 1 week ban.';
-      }
-
-      const duration =
-        7 * 24 * 60 * 60 * 1000;
-
-      const unbanAt =
-        Date.now() + duration;
-
-      await member.ban({
-        reason: 'Reached 10 warnings.'
-      });
-
-      saveTempBan(
-        member.guild.id,
-        member.id,
-        unbanAt
-      );
-
-      scheduleUnban(
-        member.guild.id,
-        member.id,
-        unbanAt
-      );
-
-      return '1 week ban';
-    }
-
-    // 12 WARNS = 3 WEEK BAN
-    if (count === 12) {
-      if (!member.bannable) {
-        return 'Could not apply the 3 week ban.';
-      }
-
-      const duration =
-        21 * 24 * 60 * 60 * 1000;
-
-      const unbanAt =
-        Date.now() + duration;
-
-      await member.ban({
-        reason: 'Reached 12 warnings.'
-      });
-
-      saveTempBan(
-        member.guild.id,
-        member.id,
-        unbanAt
-      );
-
-      scheduleUnban(
-        member.guild.id,
-        member.id,
-        unbanAt
-      );
-
-      return '3 week ban';
-    }
-
-    // 15 WARNS = PERMANENT BAN
-    if (count === 15) {
-      if (!member.bannable) {
-        return 'Could not apply the permanent ban.';
-      }
-
-      await member.ban({
-        reason: 'Reached 15 warnings.'
-      });
-
-      removeTempBan(
-        member.guild.id,
-        member.id
-      );
-
-      clearTempBanTimer(
-        member.guild.id,
-        member.id
-      );
-
-      return 'permanent ban';
-    }
-
-    return null;
-
-  } catch (error) {
-    console.error(
-      `Automatic punishment failed at ${count} warnings:`,
-      error.message
-    );
-
-    return `Automatic punishment failed: ${error.message}`;
-  }
-}
-
-// ============================================================
-// RESTORE TEMP BANS
-// ============================================================
-
-async function restoreTempBans() {
-  const data = loadJson(TEMPBAN_FILE);
-
-  let changed = false;
-
-  for (const guildId of Object.keys(data)) {
-    for (
-      const userId of Object.keys(data[guildId])
-    ) {
-      const unbanAt =
-        Number(data[guildId][userId]);
-
-      if (!Number.isFinite(unbanAt)) {
-        delete data[guildId][userId];
-        changed = true;
-        continue;
-      }
-
-      if (unbanAt <= Date.now()) {
-        try {
-          const guild =
-            await client.guilds.fetch(guildId);
-
-          await guild.members.unban(
-            userId,
-            'Temporary ban expired.'
-          );
-
-          delete data[guildId][userId];
-
-          changed = true;
-
-        } catch (error) {
-          console.log(
-            `Expired temp ban for ${userId} could not be removed: ${error.message}`
-          );
-        }
-
-      } else {
-        scheduleUnban(
-          guildId,
-          userId,
-          unbanAt
-        );
-      }
-    }
-  }
-
-  if (changed) {
-    saveJson(TEMPBAN_FILE, data);
-  }
-}
-
-// ============================================================
-// BOT READY
-// ============================================================
-
-client.once('ready', async () => {
-  console.log(
-    `Logged in as ${client.user.tag}`
-  );
-
-  client.user.setPresence({
-    status: 'dnd',
-
-    activities: [
-      {
-        name: 'server moderation',
-        type: ActivityType.Watching
-      }
-    ]
-  });
-
-  await restoreTempBans();
-
-  console.log('Bot is ready.');
-});
-
-// ============================================================
-// MESSAGE COMMAND SYSTEM
-// ============================================================
-
-client.on(
-  'messageCreate',
-  async message => {
-    if (
-      message.author.bot ||
-      !message.guild
-    ) {
-      return;
-    }
-
-    // Supports:
-    // <@BOT_ID>
-    // <@!BOT_ID>
-
-    const mentionPrefix =
-      new RegExp(
-        `^<@!?${client.user.id}>`
-      );
-
-    const match =
-      message.content.match(
-        mentionPrefix
-      );
-
-    if (!match) {
-      return;
-    }
-
-    const content =
-      message.content
-        .slice(match[0].length)
-        .trim();
-
-    // Mentioning the bot alone does NOTHING.
     if (!content) {
-      return;
+      return message.reply(
+        `👋 Hi! Use \`${prefix} help\` to see my commands.`
+      );
     }
 
-    const args =
-      content.split(/\s+/);
+    const args = content.split(/\s+/);
+    const command = args.shift().toLowerCase();
 
-    const command =
-      args.shift().toLowerCase();
+    // ===============================
+    // HELP
+    // ===============================
 
-    try {
+    if (command === "help") {
+      return message.reply({
+        embeds: [
+          {
+            title: "☕ Caffeine Moderation",
+            description:
+              `**Moderation Commands**\n\n` +
+              `\`${prefix} warn @user [reason]\`\n` +
+              `\`${prefix} warnings @user\`\n` +
+              `\`${prefix} clearwarns @user\`\n` +
+              `\`${prefix} kick @user [reason]\`\n` +
+              `\`${prefix} ban @user [reason]\`\n` +
+              `\`${prefix} timeout @user <minutes> [reason]\`\n\n` +
+              `**Automatic punishment**\n` +
+              `3 warns → 10 minute timeout\n` +
+              `5 warns → 30 minute timeout\n` +
+              `8 warns → 24 hour timeout\n` +
+              `10 warns → 1 week ban\n` +
+              `12 warns → 3 week ban\n` +
+              `15 warns → permanent ban`,
+            color: 0x5865f2
+          }
+        ]
+      });
+    }
 
-      // ========================================================
-      // HELP
-      // ========================================================
+    // ===============================
+    // CHECK MODERATOR PERMISSION
+    // ===============================
 
-      if (command === 'help') {
+    const isModerator = message.member.permissions.has(
+      PermissionsBitField.Flags.ModerateMembers
+    );
+
+    const isAdmin = message.member.permissions.has(
+      PermissionsBitField.Flags.Administrator
+    );
+
+    // ===============================
+    // WARN
+    // ===============================
+
+    if (command === "warn") {
+      if (!isModerator && !isAdmin) {
+        return message.reply("❌ You need **Moderate Members** permission.");
+      }
+
+      const member =
+        message.mentions.members.first() ||
+        message.guild.members.cache.get(args[0]);
+
+      if (!member) {
         return message.reply(
-          `MYBOY COMMANDS\n\n` +
-
-          `MODERATION\n` +
-          `@myboy warn @user reason\n` +
-          `@myboy warns @user\n` +
-          `@myboy warns leaderboard\n` +
-          `@myboy deletewarn @user 1\n` +
-          `@myboy clearwarns @user\n` +
-          `@myboy purge 10 [@user]\n` +
-          `@myboy timeout @user 10m reason\n` +
-          `@myboy untimeout @user\n` +
-          `@myboy kick @user reason\n` +
-          `@myboy ban @user reason\n` +
-          `@myboy unban USER_ID\n` +
-          `@myboy lock\n` +
-          `@myboy unlock\n` +
-          `@myboy slowmode 10\n` +
-          `@myboy nick @user NewName\n` +
-          `@myboy roleadd @user @role\n` +
-          `@myboy roleremove @user @role\n\n` +
-
-          `RULES\n` +
-          `@myboy rules\n` +
-          `@myboy setrule 1 Be respectful\n` +
-          `@myboy delrule 1\n\n` +
-
-          `GENERAL\n` +
-          `@myboy ping\n` +
-          `@myboy profile @user\n` +
-          `@myboy serverinfo\n` +
-          `@myboy introduce\n\n` +
-
-          `${VERIFY_EMOJI} AUTO WARNING PUNISHMENTS\n` +
-          `3 warns -> 10 minute timeout\n` +
-          `5 warns -> 30 minute timeout\n` +
-          `8 warns -> 24 hour timeout\n` +
-          `10 warns -> 1 week ban\n` +
-          `12 warns -> 3 week ban\n` +
-          `15 warns -> permanent ban`
+          `❌ Usage: \`${prefix} warn @user [reason]\``
         );
       }
 
-      // ========================================================
-      // PING
-      // ========================================================
+      if (member.id === message.author.id) {
+        return message.reply("❌ You cannot warn yourself.");
+      }
 
-      if (command === 'ping') {
-        return message.reply(
-          `Pong! ${client.ws.ping}ms`
+      if (member.user.bot) {
+        return message.reply("❌ You cannot warn a bot.");
+      }
+
+      const reason =
+        args.slice(1).join(" ") || "No reason provided";
+
+      let warnCount = getWarnings(message.guild.id, member.id);
+
+      warnCount++;
+      setWarnings(message.guild.id, member.id, warnCount);
+
+      await message.reply(
+        `⚠️ **${member.user.tag}** has been warned.\n` +
+        `**Reason:** ${reason}\n` +
+        `**Warnings:** ${warnCount}/15`
+      );
+
+      // ===============================
+      // AUTOMATIC PUNISHMENTS
+      // ===============================
+
+      if (warnCount === 3) {
+        await member.timeout(
+          10 * 60 * 1000,
+          "Automatic punishment: 3 warnings"
+        );
+
+        await message.channel.send(
+          `🔇 **${member.user.tag}** has been timed out for **10 minutes** because they reached **3 warnings**.`
         );
       }
 
-      // ========================================================
-      // INTRODUCE
-      // ========================================================
+      else if (warnCount === 5) {
+        await member.timeout(
+          30 * 60 * 1000,
+          "Automatic punishment: 5 warnings"
+        );
 
-      if (command === 'introduce') {
-        return message.reply(
-          `Hey! I'm ${client.user.username}.\n\n` +
-          `I'm here to help with server moderation and management.`
+        await message.channel.send(
+          `🔇 **${member.user.tag}** has been timed out for **30 minutes** because they reached **5 warnings**.`
         );
       }
 
-      // ========================================================
-      // SERVER INFO
-      // ========================================================
+      else if (warnCount === 8) {
+        await member.timeout(
+          24 * 60 * 60 * 1000,
+          "Automatic punishment: 8 warnings"
+        );
 
-      if (command === 'serverinfo') {
-        return message.reply(
-          `SERVER INFO\n\n` +
-          `Name: ${message.guild.name}\n` +
-          `Members: ${message.guild.memberCount}\n` +
-          `Channels: ${message.guild.channels.cache.size}\n` +
-          `Owner: <@${message.guild.ownerId}>`
+        await message.channel.send(
+          `🔇 **${member.user.tag}** has been timed out for **24 hours** because they reached **8 warnings**.`
         );
       }
 
-      // ========================================================
-      // PROFILE / USERINFO
-      // ========================================================
-
-      if (
-        command === 'profile' ||
-        command === 'userinfo'
-      ) {
-        const user =
-          targetUser(message) ||
-          message.author;
-
-        return message.reply(
-          `USER INFO\n\n` +
-          `User: ${user}\n` +
-          `Username: ${user.tag}\n` +
-          `ID: ${user.id}\n` +
-          `Account created: <t:${Math.floor(
-            user.createdTimestamp / 1000
-          )}:R>`
-        );
-      }
-
-      // ========================================================
-      // WARN
-      // ========================================================
-
-      if (command === 'warn') {
-
-        if (
-          !isModerator(
-            message,
-            PermissionsBitField.Flags.ModerateMembers
-          )
-        ) {
-          return message.reply(
-            "You don't have permission to warn members."
-          );
-        }
-
-        const member =
-          targetMember(message);
-
-        const actionError =
-          canActOn(
-            message,
-            member
-          );
-
-        if (actionError) {
-          return message.reply(
-            actionError
-          );
-        }
-
-        const reason =
-          cleanReason(args);
-
-        const warnings =
-          loadJson(WARN_FILE);
-
-        if (
-          !warnings[message.guild.id]
-        ) {
-          warnings[message.guild.id] = {};
-        }
-
-        if (
-          !warnings[message.guild.id][member.id]
-        ) {
-          warnings[message.guild.id][member.id] = [];
-        }
-
-        warnings[
-          message.guild.id
-        ][member.id].push({
-          reason,
-          moderator: message.author.id,
-          date: Date.now()
+      else if (warnCount === 10) {
+        await member.ban({
+          reason: "Automatic punishment: 10 warnings",
+          deleteMessageSeconds: 0
         });
 
-        const count =
-          warnings[
-            message.guild.id
-          ][member.id].length;
-
-        saveJson(
-          WARN_FILE,
-          warnings
+        await message.channel.send(
+          `🔨 **${member.user.tag}** has been banned for **1 week** because they reached **10 warnings**.`
         );
 
-        const punishment =
-          await applyWarningPunishment(
-            member,
-            count
-          );
+        // Schedule unban after 1 week
+        setTimeout(async () => {
+          try {
+            await message.guild.members.unban(
+              member.id,
+              "1 week automatic ban completed"
+            );
 
-        let response =
-          `${VERIFY_EMOJI} ${member} has been warned by ${message.author}\n` +
-          `${reason} [#${count}]`;
-
-        if (punishment) {
-          response +=
-            `\nAutomatic punishment: ${punishment}`;
-        }
-
-        return message.reply(
-          response
-        );
-      }
-
-      // ========================================================
-      // WARNS
-      // ========================================================
-
-      if (command === 'warns') {
-
-        // LEADERBOARD
-        if (
-          args[0]?.toLowerCase() ===
-          'leaderboard'
-        ) {
-          const warnings =
-            loadJson(
-              WARN_FILE
-            )[message.guild.id] || {};
-
-          const rows =
-            Object.entries(warnings)
-              .map(
-                ([userId, list]) => ({
-                  userId,
-                  count: Array.isArray(list)
-                    ? list.length
-                    : 0
-                })
-              )
-              .filter(
-                row => row.count > 0
-              )
-              .sort(
-                (a, b) =>
-                  b.count - a.count
-              )
-              .slice(0, 10);
-
-          if (!rows.length) {
-            return message.reply(
-              'No warnings have been recorded.'
+            console.log(
+              `✅ Automatically unbanned ${member.user.tag} after 1 week.`
+            );
+          } catch (error) {
+            console.log(
+              `⚠️ Could not automatically unban ${member.user.tag}.`
             );
           }
+        }, 7 * 24 * 60 * 60 * 1000);
+      }
 
-          const text =
-            rows
-              .map(
-                (row, i) =>
-                  `${i + 1}. <@${row.userId}> — ${row.count} warning(s)`
-              )
-              .join('\n');
+      else if (warnCount === 12) {
+        await member.ban({
+          reason: "Automatic punishment: 12 warnings",
+          deleteMessageSeconds: 0
+        });
 
-          return message.reply(
-            `WARNINGS LEADERBOARD\n\n${text}`
-          );
-        }
+        await message.channel.send(
+          `🔨 **${member.user.tag}** has been banned for **3 weeks** because they reached **12 warnings**.`
+        );
 
-        const user =
-          targetUser(message);
+        // Schedule unban after 3 weeks
+        setTimeout(async () => {
+          try {
+            await message.guild.members.unban(
+              member.id,
+              "3 week automatic ban completed"
+            );
 
-        if (!user) {
-          return message.reply(
-            'Usage: @myboy warns @user'
-          );
-        }
-
-        const warnings =
-          loadJson(WARN_FILE);
-
-        const list =
-          warnings[
-            message.guild.id
-          ]?.[user.id] || [];
-
-        if (!list.length) {
-          return message.reply(
-            `${user} has no warnings.`
-          );
-        }
-
-        let text =
-          `Warnings for ${user}\n\n`;
-
-        list.forEach(
-          (warning, index) => {
-            text +=
-              `#${index + 1} — ${warning.reason}\n` +
-              `Moderator: <@${warning.moderator}>\n\n`;
+            console.log(
+              `✅ Automatically unbanned ${member.user.tag} after 3 weeks.`
+            );
+          } catch (error) {
+            console.log(
+              `⚠️ Could not automatically unban ${member.user.tag}.`
+            );
           }
-        );
+        }, 21 * 24 * 60 * 60 * 1000);
+      }
 
+      else if (warnCount >= 15) {
+        await member.ban({
+          reason: "Automatic punishment: 15 warnings",
+          deleteMessageSeconds: 0
+        });
+
+        await message.channel.send(
+          `🔨 **${member.user.tag}** has been permanently banned because they reached **15 warnings**.`
+        );
+      }
+
+      return;
+    }
+
+    // ===============================
+    // WARNINGS
+    // ===============================
+
+    if (command === "warnings" || command === "warns") {
+      if (!isModerator && !isAdmin) {
+        return message.reply("❌ You need **Moderate Members** permission.");
+      }
+
+      const member =
+        message.mentions.members.first() ||
+        message.guild.members.cache.get(args[0]);
+
+      if (!member) {
         return message.reply(
-          text.slice(0, 1900)
+          `❌ Usage: \`${prefix} warnings @user\``
         );
       }
 
-      // ========================================================
-      // DELETE WARN
-      // ========================================================
+      const count = getWarnings(message.guild.id, member.id);
 
-      if (command === 'deletewarn') {
+      return message.reply(
+        `⚠️ **${member.user.tag}** has **${count} warning(s)**.`
+      );
+    }
 
-        if (
-          !isModerator(
-            message,
-            PermissionsBitField.Flags.ModerateMembers
-          )
-        ) {
-          return message.reply(
-            "You don't have permission."
-          );
-        }
+    // ===============================
+    // CLEAR WARNINGS
+    // ===============================
 
-        const user =
-          targetUser(message);
+    if (command === "clearwarns" || command === "clearwarnings") {
+      if (!isModerator && !isAdmin) {
+        return message.reply("❌ You need **Moderate Members** permission.");
+      }
 
-        const number =
-          Number(
-            args.find(
-              arg => /^\d+$/.test(arg)
-            )
-          );
+      const member =
+        message.mentions.members.first() ||
+        message.guild.members.cache.get(args[0]);
 
-        if (!user || !number) {
-          return message.reply(
-            'Usage: @myboy deletewarn @user 1'
-          );
-        }
-
-        const warnings =
-          loadJson(WARN_FILE);
-
-        const list =
-          warnings[
-            message.guild.id
-          ]?.[user.id] || [];
-
-        if (!list[number - 1]) {
-          return message.reply(
-            "That warning doesn't exist."
-          );
-        }
-
-        list.splice(
-          number - 1,
-          1
-        );
-
-        saveJson(
-          WARN_FILE,
-          warnings
-        );
-
+      if (!member) {
         return message.reply(
-          `Deleted warning #${number} from ${user}.`
+          `❌ Usage: \`${prefix} clearwarns @user\``
         );
       }
 
-      // ========================================================
-      // CLEAR WARNS
-      // ========================================================
+      setWarnings(message.guild.id, member.id, 0);
 
-      if (command === 'clearwarns') {
+      return message.reply(
+        `✅ Cleared all warnings for **${member.user.tag}**.`
+      );
+    }
 
-        if (
-          !isModerator(
-            message,
-            PermissionsBitField.Flags.ModerateMembers
-          )
-        ) {
-          return message.reply(
-            "You don't have permission."
-          );
-        }
+    // ===============================
+    // KICK
+    // ===============================
 
-        const user =
-          targetUser(message);
-
-        if (!user) {
-          return message.reply(
-            'Usage: @myboy clearwarns @user'
-          );
-        }
-
-        const warnings =
-          loadJson(WARN_FILE);
-
-        if (
-          !warnings[message.guild.id]
-        ) {
-          warnings[message.guild.id] = {};
-        }
-
-        warnings[
-          message.guild.id
-        ][user.id] = [];
-
-        saveJson(
-          WARN_FILE,
-          warnings
-        );
-
-        saveJson(
-  WARN_FILE,
-  warnings
-);
-
-       return message.reply(
-  `Cleared all warnings for ${user}.`
-);
+    if (command === "kick") {
+      if (!isAdmin) {
+        return message.reply("❌ You need **Administrator** permission.");
       }
+
+      const member =
+        message.mentions.members.first() ||
+        message.guild.members.cache.get(args[0]);
+
+      if (!member) {
+        return message.reply(
+          `❌ Usage: \`${prefix} kick @user [reason]\``
+        );
+      }
+
+      const reason =
+        args.slice(1).join(" ") || "No reason provided";
+
+      await member.kick(reason);
+
+      return message.reply(
+        `👢 **${member.user.tag}** has been kicked.\n**Reason:** ${reason}`
+      );
+    }
+
+    // ===============================
+    // BAN
+    // ===============================
+
+    if (command === "ban") {
+      if (!isAdmin) {
+        return message.reply("❌ You need **Administrator** permission.");
+      }
+
+      const member =
+        message.mentions.members.first() ||
+        message.guild.members.cache.get(args[0]);
+
+      if (!member) {
+        return message.reply(
+          `❌ Usage: \`${prefix} ban @user [reason]\``
+        );
+      }
+
+      const reason =
+        args.slice(1).join(" ") || "No reason provided";
+
+      await member.ban({
+        reason: reason,
+        deleteMessageSeconds: 0
+      });
+
+      return message.reply(
+        `🔨 **${member.user.tag}** has been banned.\n**Reason:** ${reason}`
+      );
+    }
+
+    // ===============================
+    // TIMEOUT
+    // ===============================
+
+    if (command === "timeout" || command === "mute") {
+      if (!isModerator && !isAdmin) {
+        return message.reply("❌ You need **Moderate Members** permission.");
+      }
+
+      const member =
+        message.mentions.members.first() ||
+        message.guild.members.cache.get(args[0]);
+
+      if (!member) {
+        return message.reply(
+          `❌ Usage: \`${prefix} timeout @user <minutes> [reason]\``
+        );
+      }
+
+      const minutesIndex = message.mentions.members.first() ? 0 : 1;
+      const minutes = Number(args[minutesIndex]);
+
+      if (!Number.isFinite(minutes) || minutes <= 0) {
+        return message.reply("❌ Enter a valid number of minutes.");
+      }
+
+      const reason =
+        args.slice(minutesIndex + 1).join(" ") ||
+        "No reason provided";
+
+      const duration = Math.min(
+        minutes * 60 * 1000,
+        28 * 24 * 60 * 60 * 1000
+      );
+
+      await member.timeout(duration, reason);
+
+      return message.reply(
+        `🔇 **${member.user.tag}** has been timed out for **${minutes} minute(s)**.\n` +
+        `**Reason:** ${reason}`
+      );
+    }
+
+  } catch (error) {
+    console.error("❌ Command error:", error);
+
+    if (!message.replied && !message.deferred) {
+      await message.reply(
+        "❌ Something went wrong while executing that command."
+      );
+    }
+  }
+});
+
+// ===============================
+// LOGIN
+// ===============================
+
+client.login(TOKEN);
