@@ -752,12 +752,14 @@ Account created: <t:${Math.floor(
         `Duration: ${durationArg}\n` +
         `Reason: ${reason}`
       );
-        } catch (error) {
-      console.log("TIMEOUT ERROR:", error);
-      
+            } catch (error) {
+      console.log("TIMEOUT ERROR:", error.message);
+
       return message.reply(
         `Timeout failed: ${error.message}`
       );
+    }
+  }
     }
   // ====================================================
   // UNTIMEOUT
