@@ -100,17 +100,6 @@ client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
   // =========================================
-  // @MYBOY → HEYYYYY!!!
-  // =========================================
-
-  if (
-    message.mentions.users.has(client.user.id) &&
-    message.content.trim().startsWith(`<@${client.user.id}>`)
-  ) {
-    return message.reply("Heyyyyy!!!");
-  }
-
-  // =========================================
   // PREFIX
   // =========================================
 
