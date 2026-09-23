@@ -14,9 +14,9 @@ const http = require("http");
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers
+    GatewayIntentBits.MessageContent
   ]
 });
 
@@ -24,13 +24,11 @@ const client = new Client({
 // CONFIG
 // ===============================
 
-const PREFIX = "@Bot";
 const MOD_LOG_CHANNEL_ID = "1547632399620382811";
-
 const PORT = process.env.PORT || 3000;
 
 // ===============================
-// FILE STORAGE
+// FILES
 // ===============================
 
 const WARN_FILE = "./warnings.json";
@@ -48,15 +46,21 @@ let warnings = JSON.parse(fs.readFileSync(WARN_FILE, "utf8"));
 let rules = JSON.parse(fs.readFileSync(RULE_FILE, "utf8"));
 
 function saveWarnings() {
-  fs.writeFileSync(WARN_FILE, JSON.stringify(warnings, null, 2));
+  fs.writeFileSync(
+    WARN_FILE,
+    JSON.stringify(warnings, null, 2)
+  );
 }
 
 function saveRules() {
-  fs.writeFileSync(RULE_FILE, JSON.stringify(rules, null, 2));
+  fs.writeFileSync(
+    RULE_FILE,
+    JSON.stringify(rules, null, 2)
+  );
 }
 
 // ===============================
-// RENDER WEB SERVER
+// RENDER SERVER
 // ===============================
 
 http.createServer((req, res) => {
@@ -70,7 +74,7 @@ http.createServer((req, res) => {
 });
 
 // ===============================
-// READY
+// BOT READY
 // ===============================
 
 client.once("ready", () => {
@@ -93,15 +97,17 @@ client.once("ready", () => {
 
 async function modLog(guild, title, description) {
   try {
-    const channel = guild.channels.cache.get(MOD_LOG_CHANNEL_ID);
+    const channel =
+      guild.channels.cache.get(MOD_LOG_CHANNEL_ID);
 
     if (!channel) return;
 
     await channel.send(
       `📋 **${title}**\n${description}`
     );
+
   } catch (error) {
-    console.log("Mod-log error:", error.message);
+    console.log("Mod log error:", error.message);
   }
 }
 
@@ -109,33 +115,33 @@ async function modLog(guild, title, description) {
 // HELPERS
 // ===============================
 
-function removeMentionArguments(args) {
-  return args.filter(arg => !/^<@!?\d+>$/.test(arg));
-}
-
-function getReason(args) {
-  const cleanArgs = removeMentionArguments(args);
-
-  return cleanArgs.join(" ").trim() || "No reason provided";
-}
-
-function getTarget(message) {
-  return message.mentions.members.first();
-}
-
-function getUserKey(guildId, userId) {
+function getKey(guildId, userId) {
   return `${guildId}_${userId}`;
 }
 
+function getReason(args) {
+  return args
+    .filter(arg => !/^<@!?\d+>$/.test(arg))
+    .join(" ")
+    .trim() || "No reason provided";
+}
+
 // ===============================
-// AUTOMATIC WARNING PUNISHMENTS
+// AUTOMATIC PUNISHMENTS
 // ===============================
 
-async function applyWarningPunishment(message, member, count, reason) {
+async function applyPunishment(
+  message,
+  member,
+  count,
+  reason
+) {
+
   try {
 
-    // 3 WARNINGS = 10 MIN TIMEOUT
+    // 3 WARNINGS
     if (count === 3) {
+
       await member.timeout(
         10 * 60 * 1000,
         "Reached 3 warnings"
@@ -148,12 +154,13 @@ async function applyWarningPunishment(message, member, count, reason) {
       await modLog(
         message.guild,
         "Automatic Punishment",
-        `${member} was timed out for **10 minutes** after reaching **3 warnings**.\nReason: ${reason}`
+        `${member} received a **10 minute timeout** after reaching 3 warnings.\nReason: ${reason}`
       );
     }
 
-    // 5 WARNINGS = 30 MIN TIMEOUT
+    // 5 WARNINGS
     else if (count === 5) {
+
       await member.timeout(
         30 * 60 * 1000,
         "Reached 5 warnings"
@@ -166,12 +173,13 @@ async function applyWarningPunishment(message, member, count, reason) {
       await modLog(
         message.guild,
         "Automatic Punishment",
-        `${member} was timed out for **30 minutes** after reaching **5 warnings**.\nReason: ${reason}`
+        `${member} received a **30 minute timeout** after reaching 5 warnings.\nReason: ${reason}`
       );
     }
 
-    // 8 WARNINGS = 24 HOUR TIMEOUT
+    // 8 WARNINGS
     else if (count === 8) {
+
       await member.timeout(
         24 * 60 * 60 * 1000,
         "Reached 8 warnings"
@@ -184,102 +192,132 @@ async function applyWarningPunishment(message, member, count, reason) {
       await modLog(
         message.guild,
         "Automatic Punishment",
-        `${member} was timed out for **24 hours** after reaching **8 warnings**.\nReason: ${reason}`
+        `${member} received a **24 hour timeout** after reaching 8 warnings.\nReason: ${reason}`
       );
     }
 
-    // 10 WARNINGS = 1 WEEK BAN
+    // 10 WARNINGS
     else if (count === 10) {
+
+      const userId = member.id;
+      const username = member.user.tag;
+
       await member.ban({
         deleteMessageSeconds: 0,
         reason: "Reached 10 warnings"
       });
 
       await message.channel.send(
-        `🔨 ${member.user.tag} has been **banned for 1 week** for reaching **10 warnings**.`
+        `🔨 **${username}** has been **banned for 1 week** for reaching **10 warnings**.`
       );
 
       await modLog(
         message.guild,
         "Automatic Punishment",
-        `${member.user.tag} was banned for **1 week** after reaching **10 warnings**.\nReason: ${reason}`
+        `${username} was banned for **1 week** after reaching 10 warnings.\nReason: ${reason}`
       );
 
-      // Schedule unban after 1 week
+      // NOTE:
+      // Discord bans do not automatically expire.
+      // This timer works while the bot stays running.
       setTimeout(async () => {
+
         try {
+
           await message.guild.members.unban(
-            member.id,
+            userId,
             "1 week warning punishment completed"
           );
 
           await modLog(
             message.guild,
             "Automatic Unban",
-            `${member.user.tag} was automatically unbanned after the **1 week** punishment.`
+            `${username} was automatically unbanned after 1 week.`
           );
+
         } catch (error) {
-          console.log("Automatic unban error:", error.message);
+          console.log(
+            "1 week unban error:",
+            error.message
+          );
         }
+
       }, 7 * 24 * 60 * 60 * 1000);
     }
 
-    // 12 WARNINGS = 3 WEEK BAN
+    // 12 WARNINGS
     else if (count === 12) {
+
+      const userId = member.id;
+      const username = member.user.tag;
+
       await member.ban({
         deleteMessageSeconds: 0,
         reason: "Reached 12 warnings"
       });
 
       await message.channel.send(
-        `🔨 ${member.user.tag} has been **banned for 3 weeks** for reaching **12 warnings**.`
+        `🔨 **${username}** has been **banned for 3 weeks** for reaching **12 warnings**.`
       );
 
       await modLog(
         message.guild,
         "Automatic Punishment",
-        `${member.user.tag} was banned for **3 weeks** after reaching **12 warnings**.\nReason: ${reason}`
+        `${username} was banned for **3 weeks** after reaching 12 warnings.\nReason: ${reason}`
       );
 
-      // Schedule unban after 3 weeks
       setTimeout(async () => {
+
         try {
+
           await message.guild.members.unban(
-            member.id,
+            userId,
             "3 week warning punishment completed"
           );
 
           await modLog(
             message.guild,
             "Automatic Unban",
-            `${member.user.tag} was automatically unbanned after the **3 week** punishment.`
+            `${username} was automatically unbanned after 3 weeks.`
           );
+
         } catch (error) {
-          console.log("Automatic unban error:", error.message);
+          console.log(
+            "3 week unban error:",
+            error.message
+          );
         }
+
       }, 21 * 24 * 60 * 60 * 1000);
     }
 
-    // 15 WARNINGS = PERMANENT BAN
+    // 15 WARNINGS
     else if (count === 15) {
+
+      const username = member.user.tag;
+
       await member.ban({
         deleteMessageSeconds: 0,
         reason: "Reached 15 warnings - permanent ban"
       });
 
       await message.channel.send(
-        `🔨 ${member.user.tag} has been **permanently banned** for reaching **15 warnings**.`
+        `🔨 **${username}** has been **permanently banned** for reaching **15 warnings**.`
       );
 
       await modLog(
         message.guild,
         "Automatic Punishment",
-        `${member.user.tag} was **permanently banned** after reaching **15 warnings**.\nReason: ${reason}`
+        `${username} was permanently banned after reaching 15 warnings.\nReason: ${reason}`
       );
     }
 
   } catch (error) {
-    console.log("Automatic punishment error:", error.message);
+
+    console.log(
+      "Automatic punishment error:",
+      error.message
+    );
 
     await message.channel.send(
       `⚠️ I couldn't apply the automatic punishment. Check my permissions and role position.`
@@ -288,7 +326,7 @@ async function applyWarningPunishment(message, member, count, reason) {
 }
 
 // ===============================
-// MESSAGE COMMANDS
+// COMMAND HANDLER
 // ===============================
 
 client.on("messageCreate", async message => {
@@ -297,24 +335,44 @@ client.on("messageCreate", async message => {
 
   if (!message.guild) return;
 
-  const content = message.content.trim();
+  // =====================================
+  // CHECK ACTUAL BOT MENTION
+  // =====================================
 
-  if (!content.toLowerCase().startsWith(PREFIX.toLowerCase())) {
+  const mention1 = `<@${client.user.id}>`;
+  const mention2 = `<@!${client.user.id}>`;
+
+  if (
+    !message.content.startsWith(mention1) &&
+    !message.content.startsWith(mention2)
+  ) {
     return;
   }
 
-  const args = content.slice(PREFIX.length).trim().split(/\s+/);
+  // Remove bot mention
+  let content = message.content
+    .replace(mention1, "")
+    .replace(mention2, "")
+    .trim();
 
-  const command = args.shift()?.toLowerCase();
+  if (!content) return;
 
-  if (!command) return;
+  const args = content.split(/\s+/);
+  const command = args.shift().toLowerCase();
+
+  console.log(
+    `Command received: ${command} from ${message.author.tag}`
+  );
 
   // ===============================
   // PING
   // ===============================
 
   if (command === "ping") {
-    return message.reply("Heyyyyy!!! :cat~1:");
+
+    return message.reply(
+      "Heyyyyy!!! :cat~1:"
+    );
   }
 
   // ===============================
@@ -353,8 +411,8 @@ client.on("messageCreate", async message => {
 > @Bot slowmode seconds :Verify:
 
 **Roles**
-> @Bot addrole @user role :Verify:
-> @Bot removerole @user role :Verify:
+> @Bot addrole @user @role :Verify:
+> @Bot removerole @user @role :Verify:
 
 **Nickname**
 > @Bot nick @user nickname :Verify:
@@ -372,25 +430,40 @@ client.on("messageCreate", async message => {
 
   if (command === "warn") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ModerateMembers
-    )) {
-      return message.reply("❌ You don't have permission to warn members.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ModerateMembers
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission to warn members."
+      );
     }
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
     if (!member) {
-      return message.reply("❌ Mention a member.");
+      return message.reply(
+        "❌ Mention a member.\nExample: `@Bot warn @user spam`"
+      );
+    }
+
+    if (member.id === message.author.id) {
+      return message.reply(
+        "❌ You cannot warn yourself."
+      );
     }
 
     if (member.user.bot) {
-      return message.reply("❌ You cannot warn bots.");
+      return message.reply(
+        "❌ You cannot warn bots."
+      );
     }
 
     const reason = getReason(args);
 
-    const key = getUserKey(
+    const key = getKey(
       message.guild.id,
       member.id
     );
@@ -400,7 +473,7 @@ client.on("messageCreate", async message => {
     }
 
     warnings[key].push({
-      reason,
+      reason: reason,
       moderator: message.author.id,
       timestamp: Date.now()
     });
@@ -419,7 +492,7 @@ client.on("messageCreate", async message => {
       `${member} was warned by ${message.author}\nReason: ${reason}\nWarnings: **#${count}**`
     );
 
-    await applyWarningPunishment(
+    await applyPunishment(
       message,
       member,
       count,
@@ -438,29 +511,38 @@ client.on("messageCreate", async message => {
     args[0]?.toLowerCase() === "leaderboard"
   ) {
 
-    const guildPrefix = `${message.guild.id}_`;
+    const prefix =
+      `${message.guild.id}_`;
 
-    const leaderboard = Object.entries(warnings)
-      .filter(([key]) => key.startsWith(guildPrefix))
-      .map(([key, list]) => ({
-        userId: key.replace(guildPrefix, ""),
-        count: list.length
-      }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 10);
+    const leaderboard =
+      Object.entries(warnings)
+        .filter(([key]) =>
+          key.startsWith(prefix)
+        )
+        .map(([key, list]) => ({
+          userId: key.replace(prefix, ""),
+          count: list.length
+        }))
+        .sort((a, b) =>
+          b.count - a.count
+        )
+        .slice(0, 10);
 
-    if (leaderboard.length === 0) {
-      return message.reply("📊 No warnings recorded yet.");
+    if (!leaderboard.length) {
+      return message.reply(
+        "📊 No warnings recorded yet."
+      );
     }
 
-    let text = "🏆 **Warning Leaderboard**\n\n";
+    let text =
+      "🏆 **Warning Leaderboard**\n\n";
 
-    for (let i = 0; i < leaderboard.length; i++) {
+    leaderboard.forEach((item, index) => {
 
-      const item = leaderboard[i];
+      text +=
+        `${index + 1}. <@${item.userId}> — **${item.count} warnings**\n`;
 
-      text += `${i + 1}. <@${item.userId}> — **${item.count} warnings**\n`;
-    }
+    });
 
     return message.reply(text);
   }
@@ -471,57 +553,71 @@ client.on("messageCreate", async message => {
 
   if (command === "warns") {
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
     if (!member) {
-      return message.reply("❌ Mention a member.");
+      return message.reply(
+        "❌ Mention a member."
+      );
     }
 
-    const key = getUserKey(
+    const key = getKey(
       message.guild.id,
       member.id
     );
 
     const list = warnings[key] || [];
 
-    if (list.length === 0) {
+    if (!list.length) {
       return message.reply(
         `✅ ${member} has no warnings.`
       );
     }
 
-    let text = `⚠️ **Warnings for ${member.user.tag}**\n\n`;
+    let text =
+      `⚠️ **Warnings for ${member.user.tag}**\n\n`;
 
     list.forEach((warn, index) => {
 
-      const date = new Date(warn.timestamp)
-        .toLocaleDateString();
+      text +=
+        `**#${index + 1}** — ${warn.reason}\n`;
 
-      text += `**#${index + 1}** — ${warn.reason}\n`;
-      text += `Moderator: <@${warn.moderator}>\n`;
-      text += `Date: ${date}\n\n`;
+      text +=
+        `Moderator: <@${warn.moderator}>\n`;
+
+      text +=
+        `Date: <t:${Math.floor(
+          warn.timestamp / 1000
+        )}:R>\n\n`;
     });
 
     return message.reply(text);
   }
 
   // ===============================
-  // DELETE WARNING
+  // DELETE WARN
   // ===============================
 
   if (command === "deletewarn") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ModerateMembers
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ModerateMembers
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
-    const number = parseInt(
-      args.find(arg => /^\d+$/.test(arg))
-    );
+    const number =
+      parseInt(
+        args.find(arg => /^\d+$/.test(arg))
+      );
 
     if (!member || !number) {
       return message.reply(
@@ -529,19 +625,25 @@ client.on("messageCreate", async message => {
       );
     }
 
-    const key = getUserKey(
+    const key = getKey(
       message.guild.id,
       member.id
     );
 
-    if (!warnings[key] || !warnings[key][number - 1]) {
-      return message.reply("❌ That warning doesn't exist.");
+    if (
+      !warnings[key] ||
+      !warnings[key][number - 1]
+    ) {
+      return message.reply(
+        "❌ That warning doesn't exist."
+      );
     }
 
-    const removed = warnings[key].splice(
-      number - 1,
-      1
-    )[0];
+    const removed =
+      warnings[key].splice(
+        number - 1,
+        1
+      )[0];
 
     saveWarnings();
 
@@ -552,49 +654,57 @@ client.on("messageCreate", async message => {
     await modLog(
       message.guild,
       "Warning Deleted",
-      `Warning **#${number}** for ${member} was deleted by ${message.author}.\nReason: ${removed.reason}`
+      `${message.author} deleted warning #${number} from ${member}.\nReason: ${removed.reason}`
     );
 
     return;
   }
 
   // ===============================
-  // CLEAR WARNINGS
+  // CLEAR WARNS
   // ===============================
 
   if (command === "clearwarns") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ModerateMembers
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ModerateMembers
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
     if (!member) {
-      return message.reply("❌ Mention a member.");
+      return message.reply(
+        "❌ Mention a member."
+      );
     }
 
-    const key = getUserKey(
+    const key = getKey(
       message.guild.id,
       member.id
     );
 
-    const oldCount = warnings[key]?.length || 0;
+    const count =
+      warnings[key]?.length || 0;
 
     delete warnings[key];
 
     saveWarnings();
 
     await message.reply(
-      `🧹 Cleared **${oldCount} warnings** from ${member}.`
+      `🧹 Cleared **${count} warnings** from ${member}.`
     );
 
     await modLog(
       message.guild,
       "Warnings Cleared",
-      `${oldCount} warnings were cleared from ${member} by ${message.author}.`
+      `${message.author} cleared ${count} warnings from ${member}.`
     );
 
     return;
@@ -609,33 +719,46 @@ client.on("messageCreate", async message => {
     command === "clear"
   ) {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ManageMessages
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageMessages
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const amount = parseInt(args[0]);
+    const amount =
+      parseInt(args[0]);
 
-    if (!amount || amount < 1 || amount > 100) {
+    if (
+      !amount ||
+      amount < 1 ||
+      amount > 100
+    ) {
       return message.reply(
         "❌ Enter a number between 1 and 100."
       );
     }
 
-    const deleted = await message.channel.bulkDelete(
-      amount + 1,
-      true
-    );
+    const deleted =
+      await message.channel.bulkDelete(
+        amount + 1,
+        true
+      );
+
+    const actual =
+      Math.max(deleted.size - 1, 0);
 
     await message.channel.send(
-      `🧹 Deleted **${deleted.size - 1} messages**.`
+      `🧹 Deleted **${actual} messages**.`
     );
 
     await modLog(
       message.guild,
       "Messages Purged",
-      `${message.author} deleted **${deleted.size - 1} messages** in ${message.channel}.`
+      `${message.author} deleted **${actual} messages** in ${message.channel}.`
     );
 
     return;
@@ -647,21 +770,29 @@ client.on("messageCreate", async message => {
 
   if (command === "timeout") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ModerateMembers
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ModerateMembers
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
     if (!member) {
-      return message.reply("❌ Mention a member.");
+      return message.reply(
+        "❌ Mention a member."
+      );
     }
 
-    const durationArg = args.find(
-      arg => /^\d+(s|m|h|d)$/i.test(arg)
-    );
+    const durationArg =
+      args.find(arg =>
+        /^\d+(s|m|h|d)$/i.test(arg)
+      );
 
     if (!durationArg) {
       return message.reply(
@@ -669,23 +800,38 @@ client.on("messageCreate", async message => {
       );
     }
 
-    const match = durationArg.match(
-      /^(\d+)(s|m|h|d)$/i
+    const match =
+      durationArg.match(
+        /^(\d+)(s|m|h|d)$/i
+      );
+
+    const value =
+      parseInt(match[1]);
+
+    const unit =
+      match[2].toLowerCase();
+
+    let ms = 0;
+
+    if (unit === "s")
+      ms = value * 1000;
+
+    if (unit === "m")
+      ms = value * 60 * 1000;
+
+    if (unit === "h")
+      ms = value * 60 * 60 * 1000;
+
+    if (unit === "d")
+      ms = value * 24 * 60 * 60 * 1000;
+
+    const reason =
+      getReason(args);
+
+    await member.timeout(
+      ms,
+      reason
     );
-
-    const value = parseInt(match[1]);
-    const unit = match[2].toLowerCase();
-
-    let ms;
-
-    if (unit === "s") ms = value * 1000;
-    if (unit === "m") ms = value * 60 * 1000;
-    if (unit === "h") ms = value * 60 * 60 * 1000;
-    if (unit === "d") ms = value * 24 * 60 * 60 * 1000;
-
-    const reason = getReason(args);
-
-    await member.timeout(ms, reason);
 
     await message.reply(
       `⏱️ ${member} has been timed out for **${durationArg}**.`
@@ -709,16 +855,23 @@ client.on("messageCreate", async message => {
     command === "unmute"
   ) {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ModerateMembers
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ModerateMembers
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
     if (!member) {
-      return message.reply("❌ Mention a member.");
+      return message.reply(
+        "❌ Mention a member."
+      );
     }
 
     await member.timeout(null);
@@ -742,21 +895,30 @@ client.on("messageCreate", async message => {
 
   if (command === "kick") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.KickMembers
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.KickMembers
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
     if (!member) {
-      return message.reply("❌ Mention a member.");
+      return message.reply(
+        "❌ Mention a member."
+      );
     }
 
-    const reason = getReason(args);
+    const reason =
+      getReason(args);
 
-    const username = member.user.tag;
+    const username =
+      member.user.tag;
 
     await member.kick(reason);
 
@@ -779,21 +941,30 @@ client.on("messageCreate", async message => {
 
   if (command === "ban") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.BanMembers
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.BanMembers
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
     if (!member) {
-      return message.reply("❌ Mention a member.");
+      return message.reply(
+        "❌ Mention a member."
+      );
     }
 
-    const reason = getReason(args);
+    const reason =
+      getReason(args);
 
-    const username = member.user.tag;
+    const username =
+      member.user.tag;
 
     await member.ban({
       deleteMessageSeconds: 0,
@@ -819,10 +990,14 @@ client.on("messageCreate", async message => {
 
   if (command === "unban") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.BanMembers
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.BanMembers
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
     const userId = args[0];
@@ -835,7 +1010,8 @@ client.on("messageCreate", async message => {
 
     try {
 
-      const user = await client.users.fetch(userId);
+      const user =
+        await client.users.fetch(userId);
 
       await message.guild.members.unban(
         userId,
@@ -852,7 +1028,8 @@ client.on("messageCreate", async message => {
         `${user.tag} was unbanned by ${message.author}.`
       );
 
-    } catch {
+    } catch (error) {
+
       return message.reply(
         "❌ Could not unban that user."
       );
@@ -867,10 +1044,14 @@ client.on("messageCreate", async message => {
 
   if (command === "lock") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ManageChannels
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageChannels
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
     await message.channel.permissionOverwrites.edit(
@@ -899,10 +1080,14 @@ client.on("messageCreate", async message => {
 
   if (command === "unlock") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ManageChannels
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageChannels
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
     await message.channel.permissionOverwrites.edit(
@@ -931,13 +1116,18 @@ client.on("messageCreate", async message => {
 
   if (command === "slowmode") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ManageChannels
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageChannels
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const seconds = parseInt(args[0]);
+    const seconds =
+      parseInt(args[0]);
 
     if (
       isNaN(seconds) ||
@@ -972,22 +1162,26 @@ client.on("messageCreate", async message => {
 
   if (command === "addrole") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ManageRoles
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageRoles
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
-    if (!member) {
-      return message.reply("❌ Mention a member.");
-    }
+    const role =
+      message.mentions.roles.first();
 
-    const role = message.mentions.roles.first();
-
-    if (!role) {
-      return message.reply("❌ Mention a role.");
+    if (!member || !role) {
+      return message.reply(
+        "❌ Usage: `@Bot addrole @user @role`"
+      );
     }
 
     await member.roles.add(role);
@@ -1014,22 +1208,26 @@ client.on("messageCreate", async message => {
     command === "delrole"
   ) {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ManageRoles
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageRoles
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
-    if (!member) {
-      return message.reply("❌ Mention a member.");
-    }
+    const role =
+      message.mentions.roles.first();
 
-    const role = message.mentions.roles.first();
-
-    if (!role) {
-      return message.reply("❌ Mention a role.");
+    if (!member || !role) {
+      return message.reply(
+        "❌ Usage: `@Bot removerole @user @role`"
+      );
     }
 
     await member.roles.remove(role);
@@ -1048,26 +1246,37 @@ client.on("messageCreate", async message => {
   }
 
   // ===============================
-  // NICKNAME
+  // NICK
   // ===============================
 
   if (command === "nick") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ManageNicknames
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageNicknames
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const member = getTarget(message);
+    const member =
+      message.mentions.members.first();
 
     if (!member) {
-      return message.reply("❌ Mention a member.");
+      return message.reply(
+        "❌ Mention a member."
+      );
     }
 
-    const cleanArgs = removeMentionArguments(args);
-
-    const nickname = cleanArgs.join(" ").trim();
+    const nickname =
+      args
+        .filter(arg =>
+          !/^<@!?\d+>$/.test(arg)
+        )
+        .join(" ")
+        .trim();
 
     if (!nickname) {
       return message.reply(
@@ -1097,15 +1306,20 @@ client.on("messageCreate", async message => {
   if (command === "userinfo") {
 
     const member =
-      getTarget(message) || message.member;
+      message.mentions.members.first() ||
+      message.member;
 
     return message.reply(
 `👤 **User Information**
 
 **Username:** ${member.user.tag}
 **ID:** ${member.id}
-**Joined:** <t:${Math.floor(member.joinedTimestamp / 1000)}:R>
-**Account Created:** <t:${Math.floor(member.user.createdTimestamp / 1000)}:R>`
+**Joined:** <t:${Math.floor(
+  member.joinedTimestamp / 1000
+)}:R>
+**Account Created:** <t:${Math.floor(
+  member.user.createdTimestamp / 1000
+)}:R>`
     );
   }
 
@@ -1131,19 +1345,25 @@ client.on("messageCreate", async message => {
 
   if (command === "setrule") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ManageGuild
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageGuild
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const number = parseInt(args.shift());
+    const number =
+      parseInt(args.shift());
 
-    const ruleText = args.join(" ").trim();
+    const text =
+      args.join(" ").trim();
 
-    if (!number || !ruleText) {
+    if (!number || !text) {
       return message.reply(
-        "❌ Usage: `@Bot setrule number rule text`"
+        "❌ Usage: `@Bot setrule number text`"
       );
     }
 
@@ -1151,7 +1371,8 @@ client.on("messageCreate", async message => {
       rules[message.guild.id] = {};
     }
 
-    rules[message.guild.id][number] = ruleText;
+    rules[message.guild.id][number] =
+      text;
 
     saveRules();
 
@@ -1166,13 +1387,18 @@ client.on("messageCreate", async message => {
 
   if (command === "delrule") {
 
-    if (!message.member.permissions.has(
-      PermissionsBitField.Flags.ManageGuild
-    )) {
-      return message.reply("❌ You don't have permission.");
+    if (
+      !message.member.permissions.has(
+        PermissionsBitField.Flags.ManageGuild
+      )
+    ) {
+      return message.reply(
+        "❌ You don't have permission."
+      );
     }
 
-    const number = parseInt(args[0]);
+    const number =
+      parseInt(args[0]);
 
     if (!number) {
       return message.reply(
@@ -1180,7 +1406,9 @@ client.on("messageCreate", async message => {
       );
     }
 
-    if (!rules[message.guild.id]?.[number]) {
+    if (
+      !rules[message.guild.id]?.[number]
+    ) {
       return message.reply(
         "❌ That rule doesn't exist."
       );
@@ -1204,30 +1432,36 @@ client.on("messageCreate", async message => {
     const serverRules =
       rules[message.guild.id] || {};
 
-    const entries = Object.entries(serverRules)
-      .sort((a, b) => Number(a[0]) - Number(b[0]));
+    const entries =
+      Object.entries(serverRules)
+        .sort(
+          (a, b) =>
+            Number(a[0]) - Number(b[0])
+        );
 
-    if (entries.length === 0) {
+    if (!entries.length) {
       return message.reply(
         "📜 No rules have been added yet."
       );
     }
 
-    let text = "📜 **Server Rules**\n\n";
+    let text =
+      "📜 **Server Rules**\n\n";
 
     for (const [number, rule] of entries) {
-      text += `**${number}.** ${rule}\n`;
+      text +=
+        `**${number}.** ${rule}\n`;
     }
 
     return message.reply(text);
   }
 
   // ===============================
-  // UNKNOWN COMMAND
+  // UNKNOWN
   // ===============================
 
   return message.reply(
-    `❌ Unknown command. Use **@Bot help** :cat~1:`
+    `❌ Unknown command. Use **@${client.user.username} help** :cat~1:`
   );
 });
 
