@@ -752,13 +752,13 @@ Account created: <t:${Math.floor(
         `Duration: ${durationArg}\n` +
         `Reason: ${reason}`
       );
-    } catch {
+        } catch (error) {
+      console.log("TIMEOUT ERROR:", error);
+      
       return message.reply(
-        "I couldn't timeout that member. Check my role position and permissions."
+        `Timeout failed: ${error.message}`
       );
     }
-  }
-
   // ====================================================
   // UNTIMEOUT
   // ====================================================
