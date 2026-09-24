@@ -10,6 +10,7 @@ const {
   PermissionsBitField: P,
   ActivityType,
 } = require('discord.js');
+
 const http = require('http');
 
 // Tiny web server so Render detects an open port (needed for Web Services).
@@ -36,8 +37,7 @@ const client = new Client({
 // Uses the real emoji if the bot can see it (handles animated too),
 // otherwise falls back to the static format.
 function tick() {
-  const e = client.emojis.cache.get(EMOJI_ID);
-  return e ? e.toString() : `<:e:${EMOJI_ID}>`;
+  return '<:Verify:1552499203811450891>';
 }
 
 /* ---------------------------- Persistence -------------------------- */
@@ -446,3 +446,4 @@ client.on('messageCreate', async (message) => {
 process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
 
 client.login(process.env.TOKEN);
+    
