@@ -10,6 +10,15 @@ const {
   PermissionsBitField: P,
   ActivityType,
 } = require('discord.js');
+const http = require('http');
+
+// Tiny web server so Render detects an open port (needed for Web Services).
+http
+  .createServer((req, res) => {
+    res.writeHead(200);
+    res.end('Bot is running');
+  })
+  .listen(process.env.PORT || 3000, () => console.log('Web server ready'));
 
 const EMOJI_ID = '1552499203811450891';
 
@@ -437,4 +446,3 @@ client.on('messageCreate', async (message) => {
 process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
 
 client.login(process.env.TOKEN);
-                        
