@@ -644,4 +644,4 @@ if (!process.env.TOKEN) {
         console.error('FATAL: login failed —', err.message);
       });
   });
-    }
+}
