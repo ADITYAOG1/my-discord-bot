@@ -554,7 +554,7 @@ cmd('help', null, 'help', 'Show all commands', async (m) => {
 });
 
 /* ------------------------------ Events ----------------------------- */
-client.once('clientReady', () => {
+client.once('ready', () => {
   console.log(`Logged in as ${client.user.tag}`);
   client.user.setPresence({
     status: 'dnd',
@@ -563,6 +563,10 @@ client.once('clientReady', () => {
   checkTempbans();
   setInterval(checkTempbans, 30 * 1000);
 });
+
+client.on('error', (err) => console.error('Client error:', err));
+client.on('shardError', (err) => console.error('Shard error:', err));
+client.on('warn', (msg) => console.warn('Client warning:', msg));
 
 client.on('messageCreate', async (message) => {
   if (message.author.bot || !message.guild) return;
@@ -599,5 +603,12 @@ client.on('messageCreate', async (message) => {
 });
 
 process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
+process.on('uncaughtException', (err) => console.error('Uncaught exception:', err));
 
-client.login(process.env.TOKEN);
+if (!process.env.TOKEN) {
+  console.error('FATAL: the TOKEN environment variable is not set. Add it in Render → Environment.');
+} else {
+  client.login(process.env.TOKEN).catch((err) => {
+    console.error('FATAL: login failed —', err.message);
+  });
+}
