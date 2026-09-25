@@ -1,17 +1,22 @@
 // index.js — discord.js v14
-// Prefix: mention the bot (@Bot command ...)
+// Works with two prefixes: mention the bot (@Caffeine Assistant warn @user)
+// or the "!" prefix (!warn @user).
 // Env vars: TOKEN (required), DATA_DIR (optional, set to your Render disk mount e.g. /data)
 
 const fs = require('fs');
 const path = require('path');
+const http = require('http');
 const {
   Client,
   GatewayIntentBits,
   PermissionsBitField: P,
   ActivityType,
+  EmbedBuilder,
 } = require('discord.js');
 
-const http = require('http');
+const PREFIX = '!';
+const EMOJI_ID = '1552499203811450891';
+const EMBED_COLOR = 0x8a2be2;
 
 // Tiny web server so Render detects an open port (needed for Web Services).
 http
@@ -20,8 +25,6 @@ http
     res.end('Bot is running');
   })
   .listen(process.env.PORT || 3000, () => console.log('Web server ready'));
-
-const EMOJI_ID = '1552499203811450891';
 
 const client = new Client({
   intents: [
@@ -34,8 +37,6 @@ const client = new Client({
 });
 
 /* ------------------------------ Emoji ------------------------------ */
-// Uses the real emoji if the bot can see it (handles animated too),
-// otherwise falls back to the static format.
 function tick() {
   return '<a:11222:1552499203811450891>';
 }
@@ -43,7 +44,7 @@ function tick() {
 /* ---------------------------- Persistence -------------------------- */
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 const DATA_FILE = path.join(DATA_DIR, 'data.json');
-let db = { warns: {}, tempbans: [] };
+let db = { warns: {}, tempbans: [], modlogs: {}, notes: {} };
 
 try {
   if (fs.existsSync(DATA_FILE)) {
@@ -69,6 +70,13 @@ function setWarns(g, u, n) {
   if (!db.warns[g]) db.warns[g] = {};
   if (n <= 0) delete db.warns[g][u];
   else db.warns[g][u] = n;
+  save();
+}
+
+function logAction(guildId, type, userId, moderatorId, reason) {
+  if (!db.modlogs[guildId]) db.modlogs[guildId] = [];
+  db.modlogs[guildId].push({ type, userId, moderatorId, reason, time: Date.now() });
+  if (db.modlogs[guildId].length > 500) db.modlogs[guildId] = db.modlogs[guildId].slice(-500);
   save();
 }
 
@@ -117,16 +125,27 @@ function reasonFrom(args) {
   return r || 'No reason provided';
 }
 
-// Sends a message without pinging anyone.
+// Sends a plain message without pinging anyone.
 function say(message, text) {
   return message.channel.send({ content: text, allowedMentions: { parse: [] } });
 }
-// Success message: same format as before, with the custom emoji at the end.
+// Plain success message (used for utility commands that don't warrant an embed).
 function done(message, text) {
   return say(message, `${text} ${tick()}`);
 }
 function fail(message, text) {
   return say(message, `❌ ${text}`);
+}
+
+// Styled embed used for the main moderation actions (ban, kick, timeout, warn, etc.)
+function modEmbed({ action, target, by, moderator, reason, footer }) {
+  let desc = `**${target} has been ${action}** ${tick()}\n\n**${by}**\n${moderator}`;
+  if (reason !== undefined) desc += `\n\n**Reason**\n${reason}`;
+  if (footer) desc += `\n\n### ${footer}`;
+  return new EmbedBuilder().setColor(EMBED_COLOR).setDescription(desc);
+}
+function sendModEmbed(message, opts) {
+  return message.channel.send({ embeds: [modEmbed(opts)], allowedMentions: { parse: [] } });
 }
 
 // Role hierarchy check for the command author and the bot.
@@ -196,6 +215,7 @@ async function escalate(message, userId, count) {
       await message.guild.members.ban(userId, { reason });
       if (step.ms) addTempban(message.guild.id, userId, Date.now() + step.ms);
     }
+    logAction(message.guild.id, 'Auto-escalation', userId, client.user.id, `${count} warns → ${step.label}`);
     await say(message, `⚠️ <@${userId}> reached ${count} warns → ${step.label} ${tick()}`);
   } catch (err) {
     console.error('Escalation failed:', err);
@@ -210,6 +230,8 @@ function cmd(names, perm, usage, desc, run) {
   for (const n of list) commands[n] = c;
 }
 
+/* ---- Bans / kicks / timeouts ---- */
+
 cmd('ban', P.Flags.BanMembers, 'ban @user [reason]', 'Ban a member', async (m, args) => {
   const id = parseUserId(args.shift());
   if (!id) return fail(m, 'Usage: `ban @user [reason]`');
@@ -219,7 +241,21 @@ cmd('ban', P.Flags.BanMembers, 'ban @user [reason]', 'Ban a member', async (m, a
   if (err) return fail(m, err);
   await m.guild.members.ban(id, { reason: `${m.author.tag}: ${reason}` });
   removeTempban(m.guild.id, id);
-  return done(m, `<@${id}> is banned by ${m.author} | Reason: ${reason}`);
+  logAction(m.guild.id, 'Ban', id, m.author.id, reason);
+  return sendModEmbed(m, { action: 'banned', target: `<@${id}>`, by: 'Banned by', moderator: `${m.author}`, reason });
+});
+
+cmd('softban', P.Flags.BanMembers, 'softban @user [reason]', 'Ban then unban to purge recent messages', async (m, args) => {
+  const id = parseUserId(args.shift());
+  if (!id) return fail(m, 'Usage: `softban @user [reason]`');
+  const reason = reasonFrom(args);
+  const target = await fetchMember(m.guild, id);
+  const err = hierarchyError(m, target);
+  if (err) return fail(m, err);
+  await m.guild.members.ban(id, { reason: `${m.author.tag}: ${reason}`, deleteMessageSeconds: 7 * 24 * 3600 });
+  await m.guild.members.unban(id, 'Softban cleanup').catch(() => {});
+  logAction(m.guild.id, 'Softban', id, m.author.id, reason);
+  return sendModEmbed(m, { action: 'softbanned', target: `<@${id}>`, by: 'Softbanned by', moderator: `${m.author}`, reason });
 });
 
 cmd('tempban', P.Flags.BanMembers, 'tempban @user <10m|2h|3d|1w> [reason]', 'Temporarily ban a member', async (m, args) => {
@@ -232,7 +268,8 @@ cmd('tempban', P.Flags.BanMembers, 'tempban @user <10m|2h|3d|1w> [reason]', 'Tem
   if (err) return fail(m, err);
   await m.guild.members.ban(id, { reason: `${m.author.tag}: ${reason}` });
   addTempban(m.guild.id, id, Date.now() + ms);
-  return done(m, `<@${id}> is temp banned by ${m.author} | Duration: ${fmtDuration(ms)} | Reason: ${reason}`);
+  logAction(m.guild.id, 'Tempban', id, m.author.id, `${reason} (${fmtDuration(ms)})`);
+  return sendModEmbed(m, { action: 'temp banned', target: `<@${id}>`, by: 'Temp banned by', moderator: `${m.author}`, reason: `${reason}\n*Duration: ${fmtDuration(ms)}*` });
 });
 
 cmd('unban', P.Flags.BanMembers, 'unban <userID> [reason]', 'Unban a user', async (m, args) => {
@@ -243,7 +280,8 @@ cmd('unban', P.Flags.BanMembers, 'unban <userID> [reason]', 'Unban a user', asyn
     throw new Error('That user is not banned.');
   });
   removeTempban(m.guild.id, id);
-  return done(m, `<@${id}> is unbanned by ${m.author} | Reason: ${reason}`);
+  logAction(m.guild.id, 'Unban', id, m.author.id, reason);
+  return sendModEmbed(m, { action: 'unbanned', target: `<@${id}>`, by: 'Unbanned by', moderator: `${m.author}`, reason });
 });
 
 cmd('kick', P.Flags.KickMembers, 'kick @user [reason]', 'Kick a member', async (m, args) => {
@@ -255,7 +293,8 @@ cmd('kick', P.Flags.KickMembers, 'kick @user [reason]', 'Kick a member', async (
   const err = hierarchyError(m, target);
   if (err) return fail(m, err);
   await target.kick(`${m.author.tag}: ${reason}`);
-  return done(m, `<@${id}> is kicked by ${m.author} | Reason: ${reason}`);
+  logAction(m.guild.id, 'Kick', id, m.author.id, reason);
+  return sendModEmbed(m, { action: 'kicked', target: `<@${id}>`, by: 'Kicked by', moderator: `${m.author}`, reason });
 });
 
 cmd(['timeout', 'mute'], P.Flags.ModerateMembers, 'timeout @user <10m|2h|1d> [reason]', 'Timeout a member', async (m, args) => {
@@ -269,7 +308,8 @@ cmd(['timeout', 'mute'], P.Flags.ModerateMembers, 'timeout @user <10m|2h|1d> [re
   const err = hierarchyError(m, target);
   if (err) return fail(m, err);
   await target.timeout(ms, `${m.author.tag}: ${reason}`);
-  return done(m, `<@${id}> is muted by ${m.author} | Duration: ${fmtDuration(ms)} | Reason: ${reason}`);
+  logAction(m.guild.id, 'Timeout', id, m.author.id, `${reason} (${fmtDuration(ms)})`);
+  return sendModEmbed(m, { action: 'timed out', target: `<@${id}>`, by: 'Timed out by', moderator: `${m.author}`, reason: `${reason}\n*Duration: ${fmtDuration(ms)}*` });
 });
 
 cmd(['untimeout', 'unmute'], P.Flags.ModerateMembers, 'untimeout @user [reason]', 'Remove a timeout', async (m, args) => {
@@ -279,10 +319,13 @@ cmd(['untimeout', 'unmute'], P.Flags.ModerateMembers, 'untimeout @user [reason]'
   const target = await fetchMember(m.guild, id);
   if (!target) return fail(m, 'That member is not in the server.');
   await target.timeout(null, `${m.author.tag}: ${reason}`);
-  return done(m, `<@${id}> is unmuted by ${m.author} | Reason: ${reason}`);
+  logAction(m.guild.id, 'Untimeout', id, m.author.id, reason);
+  return sendModEmbed(m, { action: 'un-timed out', target: `<@${id}>`, by: 'Timeout removed by', moderator: `${m.author}`, reason });
 });
 
-cmd('warn', P.Flags.ModerateMembers, 'warn @user [reason]', 'Warn a member', async (m, args) => {
+/* ---- Warnings ---- */
+
+cmd('warn', P.Flags.ModerateMembers, 'warn @user <reason>', 'Warn a member', async (m, args) => {
   const id = parseUserId(args.shift());
   if (!id) return fail(m, 'Usage: `warn @user [reason]`');
   const reason = reasonFrom(args);
@@ -292,24 +335,41 @@ cmd('warn', P.Flags.ModerateMembers, 'warn @user [reason]', 'Warn a member', asy
   if (err) return fail(m, err);
   const count = getWarns(m.guild.id, id) + 1;
   setWarns(m.guild.id, id, count);
-  await done(m, `<@${id}> is warned by ${m.author} | Reason: ${reason} | Warns: #${count}`);
+  logAction(m.guild.id, 'Warn', id, m.author.id, `${reason} (Warn #${count})`);
+  await sendModEmbed(m, {
+    action: 'warned',
+    target: `<@${id}>`,
+    by: 'Warned by',
+    moderator: `${m.author}`,
+    reason: `${reason}\n*(Warn #${count})*`,
+    footer: "Next time behave yourself sir/ma'am",
+  });
   await escalate(m, id, count);
 });
 
-cmd('warns', P.Flags.ModerateMembers, 'warns @user', 'Show a member\'s warns', async (m, args) => {
+cmd('warns', P.Flags.ModerateMembers, 'warns @user | warns leaderboard', 'Show warns, or the top 5 most-warned members', async (m, args) => {
+  if ((args[0] || '').toLowerCase() === 'leaderboard') {
+    const guildWarns = db.warns[m.guild.id] || {};
+    const sorted = Object.entries(guildWarns).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    if (!sorted.length) return say(m, 'No warns recorded yet.');
+    const lines = sorted.map(([uid, n], i) => `**#${i + 1}** <@${uid}> — ${n} warn(s)`);
+    const embed = new EmbedBuilder().setColor(EMBED_COLOR).setTitle('⚠️ Most Warned Members').setDescription(lines.join('\n'));
+    return m.channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+  }
   const id = parseUserId(args.shift());
-  if (!id) return fail(m, 'Usage: `warns @user`');
+  if (!id) return fail(m, 'Usage: `warns @user` or `warns leaderboard`');
   return say(m, `<@${id}> has ${getWarns(m.guild.id, id)} warn(s).`);
 });
 
-cmd(['unwarn', 'removewarn'], P.Flags.ModerateMembers, 'unwarn @user [reason]', 'Remove one warn', async (m, args) => {
+cmd(['unwarn', 'removewarn', 'deletewarn'], P.Flags.ModerateMembers, 'unwarn @user [reason]', 'Remove one warn', async (m, args) => {
   const id = parseUserId(args.shift());
   if (!id) return fail(m, 'Usage: `unwarn @user [reason]`');
   const reason = reasonFrom(args);
   const current = getWarns(m.guild.id, id);
   if (!current) return fail(m, 'That member has no warns.');
   setWarns(m.guild.id, id, current - 1);
-  return done(m, `<@${id}> is unwarned by ${m.author} | Reason: ${reason} | Warns: #${current - 1}`);
+  logAction(m.guild.id, 'Unwarn', id, m.author.id, `${reason} (Warns now: ${current - 1})`);
+  return sendModEmbed(m, { action: 'unwarned', target: `<@${id}>`, by: 'Warning removed by', moderator: `${m.author}`, reason: `${reason}\n*(Warns: #${current - 1})*` });
 });
 
 cmd(['clearwarns', 'resetwarns'], P.Flags.ModerateMembers, 'clearwarns @user [reason]', 'Clear all warns', async (m, args) => {
@@ -317,15 +377,56 @@ cmd(['clearwarns', 'resetwarns'], P.Flags.ModerateMembers, 'clearwarns @user [re
   if (!id) return fail(m, 'Usage: `clearwarns @user [reason]`');
   const reason = reasonFrom(args);
   setWarns(m.guild.id, id, 0);
-  return done(m, `<@${id}> warns cleared by ${m.author} | Reason: ${reason}`);
+  logAction(m.guild.id, 'Clearwarns', id, m.author.id, reason);
+  return sendModEmbed(m, { action: 'had all warns cleared', target: `<@${id}>`, by: 'Cleared by', moderator: `${m.author}`, reason });
 });
 
-cmd(['purge', 'clear'], P.Flags.ManageMessages, 'purge <1-100>', 'Delete recent messages', async (m, args) => {
+/* ---- Notes & logs ---- */
+
+cmd('note', P.Flags.ModerateMembers, 'note @user <text>', 'Add a private mod note on a member', async (m, args) => {
+  const id = parseUserId(args.shift());
+  const text = args.join(' ').trim();
+  if (!id || !text) return fail(m, 'Usage: `note @user <text>`');
+  if (!db.notes[m.guild.id]) db.notes[m.guild.id] = {};
+  if (!db.notes[m.guild.id][id]) db.notes[m.guild.id][id] = [];
+  db.notes[m.guild.id][id].push({ text, moderatorId: m.author.id, time: Date.now() });
+  save();
+  return done(m, `Note added for <@${id}>`);
+});
+
+cmd('modlogs', P.Flags.ModerateMembers, 'modlogs @user', "Show a member's mod history", async (m, args) => {
+  const id = parseUserId(args.shift());
+  if (!id) return fail(m, 'Usage: `modlogs @user`');
+  const logs = (db.modlogs[m.guild.id] || []).filter((l) => l.userId === id).slice(-10);
+  const notes = (db.notes[m.guild.id] && db.notes[m.guild.id][id]) || [];
+  if (!logs.length && !notes.length) return say(m, `<@${id}> has no mod history.`);
+  const lines = logs.map((l) => `**${l.type}** by <@${l.moderatorId}> — ${l.reason} (<t:${Math.floor(l.time / 1000)}:R>)`);
+  if (notes.length) {
+    lines.push('', '**Notes**');
+    notes.slice(-5).forEach((n) => lines.push(`• ${n.text} — <@${n.moderatorId}> (<t:${Math.floor(n.time / 1000)}:R>)`));
+  }
+  const embed = new EmbedBuilder().setColor(EMBED_COLOR).setTitle(`Mod history`).setDescription(lines.join('\n'));
+  return m.channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
+});
+
+/* ---- Channel & server utility ---- */
+
+cmd(['purge', 'clear'], P.Flags.ManageMessages, 'purge <1-100> [@user]', 'Delete recent messages, optionally only from one member', async (m, args) => {
   const n = parseInt(args[0], 10);
-  if (!n || n < 1 || n > 100) return fail(m, 'Usage: `purge <1-100>`');
+  if (!n || n < 1 || n > 100) return fail(m, 'Usage: `purge <1-100> [@user]`');
+  const filterId = parseUserId(args[1]);
   await m.delete().catch(() => {});
-  const deleted = await m.channel.bulkDelete(n, true);
-  const sent = await done(m, `${deleted.size} messages purged by ${m.author}`);
+  let deletedCount;
+  if (filterId) {
+    const recent = await m.channel.messages.fetch({ limit: 100 });
+    const matching = recent.filter((msg) => msg.author.id === filterId).first(n);
+    await m.channel.bulkDelete(matching, true);
+    deletedCount = matching.length;
+  } else {
+    const deleted = await m.channel.bulkDelete(n, true);
+    deletedCount = deleted.size;
+  }
+  const sent = await done(m, `${deletedCount} messages purged by ${m.author}`);
   setTimeout(() => sent.delete().catch(() => {}), 5000);
 });
 
@@ -392,18 +493,64 @@ cmd('removerole', P.Flags.ManageRoles, 'removerole @user <role>', 'Remove a role
   return done(m, `${role.name} role removed from <@${id}> by ${m.author}`);
 });
 
+/* ---- Help ---- */
+
 cmd('help', null, 'help', 'Show all commands', async (m) => {
-  const seen = new Set();
-  const lines = [];
-  for (const c of Object.values(commands)) {
-    if (seen.has(c.name)) continue;
-    seen.add(c.name);
-    lines.push(`**${c.usage}** — ${c.desc}`);
-  }
-  return m.channel.send({
-    content: `**Commands** (mention me first, e.g. \`@${client.user.username} warn @user\`)\n${lines.join('\n')}\n\nDurations: \`10m\`, \`2h\`, \`3d\`, \`1w\`\nWarn punishments: 3 → 10m timeout, 5 → 30m, 8 → 24h, 12 → 1 week ban, 14 → 3 week ban, 16 → permanent ban`,
-    allowedMentions: { parse: [] },
-  });
+  const t = tick();
+  const embed = new EmbedBuilder()
+    .setColor(EMBED_COLOR)
+    .setTitle('📖 Caffeine Assistant — Commands')
+    .setDescription(
+      `Mention me or use \`${PREFIX}\` as a prefix, e.g.\n` +
+      `\`@${client.user.username} warn @user reason\` or \`${PREFIX}warn @user reason\``
+    )
+    .addFields(
+      {
+        name: '📢 Warnings',
+        value:
+          `\`warn @user <reason>\` — Warn a member ${t}\n` +
+          `\`unwarn @user [reason]\` — Remove one warn ${t}\n` +
+          `\`clearwarns @user [reason]\` — Clear all warns ${t}\n` +
+          `\`warns @user\` — View warning history ${t}\n` +
+          `\`warns leaderboard\` — Top 5 most warned ${t}`,
+      },
+      {
+        name: '⚔️ Punishments',
+        value:
+          `\`ban @user [reason]\` — Ban a member ${t}\n` +
+          `\`softban @user [reason]\` — Ban then unban, purges messages ${t}\n` +
+          `\`tempban @user <10m|2h|3d|1w> [reason]\` — Temp ban ${t}\n` +
+          `\`unban <userID> [reason]\` — Unban a user ${t}\n` +
+          `\`kick @user [reason]\` — Kick a member ${t}\n` +
+          `\`timeout @user <10m|2h|1d> [reason]\` — Timeout a member ${t}\n` +
+          `\`untimeout @user [reason]\` — Remove a timeout ${t}`,
+      },
+      {
+        name: '🛠️ Channel & Server',
+        value:
+          `\`purge <1-100> [@user]\` — Delete recent messages ${t}\n` +
+          `\`lock [reason]\` — Lock this channel ${t}\n` +
+          `\`unlock [reason]\` — Unlock this channel ${t}\n` +
+          `\`slowmode <seconds|off>\` — Set channel slowmode ${t}\n` +
+          `\`nick @user <name|reset>\` — Change a nickname ${t}`,
+      },
+      {
+        name: '🎭 Roles',
+        value:
+          `\`addrole @user <role>\` — Give a role ${t}\n` +
+          `\`removerole @user <role>\` — Remove a role ${t}`,
+      },
+      {
+        name: '📝 Notes & Logs',
+        value:
+          `\`note @user <text>\` — Add a private mod note ${t}\n` +
+          `\`modlogs @user\` — View a member's mod history ${t}`,
+      }
+    )
+    .setFooter({
+      text: 'Durations: 10m, 2h, 3d, 1w  •  Warns: 3→10m timeout, 5→30m, 8→24h, 12→1w ban, 14→3w ban, 16→perma ban',
+    });
+  return m.channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
 });
 
 /* ------------------------------ Events ----------------------------- */
@@ -421,9 +568,17 @@ client.on('messageCreate', async (message) => {
   if (message.author.bot || !message.guild) return;
 
   const mentionRe = new RegExp(`^<@!?${client.user.id}>\\s*`);
-  if (!mentionRe.test(message.content)) return;
+  let content = message.content;
 
-  const args = message.content.replace(mentionRe, '').trim().split(/\s+/).filter(Boolean);
+  if (mentionRe.test(content)) {
+    content = content.replace(mentionRe, '');
+  } else if (content.startsWith(PREFIX)) {
+    content = content.slice(PREFIX.length);
+  } else {
+    return;
+  }
+
+  const args = content.trim().split(/\s+/).filter(Boolean);
   const name = (args.shift() || '').replace(/^[@!]/, '').toLowerCase();
   const command = commands[name];
   if (!command) return;
@@ -446,4 +601,3 @@ client.on('messageCreate', async (message) => {
 process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
 
 client.login(process.env.TOKEN);
-
