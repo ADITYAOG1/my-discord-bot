@@ -605,10 +605,17 @@ client.on('messageCreate', async (message) => {
 process.on('unhandledRejection', (err) => console.error('Unhandled rejection:', err));
 process.on('uncaughtException', (err) => console.error('Uncaught exception:', err));
 
+console.log('Node version:', process.version);
+
 if (!process.env.TOKEN) {
   console.error('FATAL: the TOKEN environment variable is not set. Add it in Render → Environment.');
 } else {
-  client.login(process.env.TOKEN).catch((err) => {
-    console.error('FATAL: login failed —', err.message);
-  });
+  console.log('TOKEN is set, length:', process.env.TOKEN.trim().length, '(a real bot token is usually 59-72 characters)');
+  console.log('Attempting Discord login...');
+  client
+    .login(process.env.TOKEN.trim())
+    .then(() => console.log('login() resolved — waiting for the ready event...'))
+    .catch((err) => {
+      console.error('FATAL: login failed —', err.message);
+    });
 }
