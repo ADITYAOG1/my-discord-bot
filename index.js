@@ -607,15 +607,41 @@ process.on('uncaughtException', (err) => console.error('Uncaught exception:', er
 
 console.log('Node version:', process.version);
 
+// Quick outbound-network sanity check against Discord's public API.
+function testDiscordReachability() {
+  return new Promise((resolve) => {
+    const req = require('https').get(
+      'https://discord.com/api/v10/gateway',
+      { timeout: 8000 },
+      (res) => {
+        console.log('Reachability check: got HTTP', res.statusCode, 'from discord.com');
+        res.resume();
+        resolve();
+      }
+    );
+    req.on('timeout', () => {
+      console.error('Reachability check: TIMED OUT reaching discord.com — outbound network is likely blocked.');
+      req.destroy();
+      resolve();
+    });
+    req.on('error', (err) => {
+      console.error('Reachability check: FAILED —', err.message);
+      resolve();
+    });
+  });
+}
+
 if (!process.env.TOKEN) {
   console.error('FATAL: the TOKEN environment variable is not set. Add it in Render → Environment.');
 } else {
   console.log('TOKEN is set, length:', process.env.TOKEN.trim().length, '(a real bot token is usually 59-72 characters)');
-  console.log('Attempting Discord login...');
-  client
-    .login(process.env.TOKEN.trim())
-    .then(() => console.log('login() resolved — waiting for the ready event...'))
-    .catch((err) => {
-      console.error('FATAL: login failed —', err.message);
-    });
-}
+  testDiscordReachability().then(() => {
+    console.log('Attempting Discord login...');
+    client
+      .login(process.env.TOKEN.trim())
+      .then(() => console.log('login() resolved — waiting for the ready event...'))
+      .catch((err) => {
+        console.error('FATAL: login failed —', err.message);
+      });
+  });
+    }
