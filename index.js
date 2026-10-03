@@ -1,6 +1,6 @@
 // index.js — discord.js v14
 // Works with two prefixes: mention the bot (@Caffeine Assistant warn @user)
-// or the "!" prefix (!warn @user).
+// or the "-" prefix (-warn @user).
 // Env vars: TOKEN (required), DATA_DIR (optional, set to your Render disk mount e.g. /data)
 
 const fs = require('fs');
@@ -14,9 +14,10 @@ const {
   EmbedBuilder,
 } = require('discord.js');
 
-const PREFIX = '!';
-const EMOJI_ID = '1552499203811450891';
+const PREFIX = '-';
 const EMBED_COLOR = 0x8a2be2;
+const BULLET_EMOJI = '<:112:1555866911378776144>';
+const FOOTER_EMOJI = '<:114:1555867064516874341>';
 
 // Tiny web server so Render detects an open port (needed for Web Services).
 http
@@ -65,11 +66,38 @@ function save() {
   }
 }
 
-const getWarns = (g, u) => (db.warns[g] && db.warns[g][u]) || 0;
-function setWarns(g, u, n) {
+// Warns are stored per-user as an array of { reason, moderatorId, time }.
+function getWarnList(g, u) {
+  if (!db.warns[g]) return [];
+  const v = db.warns[g][u];
+  if (!v) return [];
+  if (Array.isArray(v)) return v;
+  // Migrate old count-only warns into placeholder entries.
+  const arr = Array.from({ length: v }, () => ({ reason: 'No reason provided', moderatorId: null, time: Date.now() }));
+  db.warns[g][u] = arr;
+  save();
+  return arr;
+}
+function addWarn(g, u, reason, moderatorId) {
   if (!db.warns[g]) db.warns[g] = {};
-  if (n <= 0) delete db.warns[g][u];
-  else db.warns[g][u] = n;
+  const list = getWarnList(g, u);
+  list.push({ reason, moderatorId, time: Date.now() });
+  db.warns[g][u] = list;
+  save();
+  return list.length;
+}
+function removeLastWarn(g, u) {
+  const list = getWarnList(g, u);
+  if (!list.length) return null;
+  list.pop();
+  if (!db.warns[g]) db.warns[g] = {};
+  db.warns[g][u] = list;
+  save();
+  return list.length;
+}
+function clearWarnsFn(g, u) {
+  if (!db.warns[g]) db.warns[g] = {};
+  db.warns[g][u] = [];
   save();
 }
 
@@ -138,10 +166,18 @@ function fail(message, text) {
 }
 
 // Styled embed used for the main moderation actions (ban, kick, timeout, warn, etc.)
-function modEmbed({ action, target, by, moderator, reason, footer }) {
-  let desc = `**${target} has been ${action}** ${tick()}\n\n**${by}**\n${moderator}`;
-  if (reason !== undefined) desc += `\n\n**Reason**\n${reason}`;
-  if (footer) desc += `\n\n### ${footer}`;
+function modEmbed({ action, target, by, moderator, reason, warnsList, footer }) {
+  let desc = `**${target} has been ${action}** ${tick()}\n\n`;
+  desc += `${BULLET_EMOJI} **${by}**\n${moderator}`;
+  if (reason !== undefined) {
+    desc += `\n\n${BULLET_EMOJI} **Reason**\n${reason}`;
+  }
+  if (warnsList) {
+    desc += `\n\n${BULLET_EMOJI} **Warns**\n${warnsList}`;
+  }
+  if (footer) {
+    desc += `\n\n-# ${footer} ${FOOTER_EMOJI}`;
+  }
   return new EmbedBuilder().setColor(EMBED_COLOR).setDescription(desc);
 }
 function sendModEmbed(message, opts) {
@@ -333,16 +369,19 @@ cmd('warn', P.Flags.ModerateMembers, 'warn @user <reason>', 'Warn a member', asy
   if (!target) return fail(m, 'That member is not in the server.');
   const err = hierarchyError(m, target);
   if (err) return fail(m, err);
-  const count = getWarns(m.guild.id, id) + 1;
-  setWarns(m.guild.id, id, count);
+  const count = addWarn(m.guild.id, id, reason, m.author.id);
   logAction(m.guild.id, 'Warn', id, m.author.id, `${reason} (Warn #${count})`);
+  const list = getWarnList(m.guild.id, id).slice(-15);
+  const startNum = count - list.length + 1;
+  const warnsList = list.map((w, i) => `*Warn #${startNum + i}* ${w.reason}`).join('\n');
   await sendModEmbed(m, {
     action: 'warned',
     target: `<@${id}>`,
     by: 'Warned by',
     moderator: `${m.author}`,
-    reason: `${reason}\n*(Warn #${count})*`,
-    footer: "Next time behave yourself sir/ma'am",
+    reason,
+    warnsList,
+    footer: "Next time behave yourself",
   });
   await escalate(m, id, count);
 });
@@ -350,7 +389,11 @@ cmd('warn', P.Flags.ModerateMembers, 'warn @user <reason>', 'Warn a member', asy
 cmd('warns', P.Flags.ModerateMembers, 'warns @user | warns leaderboard', 'Show warns, or the top 5 most-warned members', async (m, args) => {
   if ((args[0] || '').toLowerCase() === 'leaderboard') {
     const guildWarns = db.warns[m.guild.id] || {};
-    const sorted = Object.entries(guildWarns).sort((a, b) => b[1] - a[1]).slice(0, 5);
+    const sorted = Object.entries(guildWarns)
+      .map(([uid, v]) => [uid, Array.isArray(v) ? v.length : v])
+      .filter(([, n]) => n > 0)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
     if (!sorted.length) return say(m, 'No warns recorded yet.');
     const lines = sorted.map(([uid, n], i) => `**#${i + 1}** <@${uid}> — ${n} warn(s)`);
     const embed = new EmbedBuilder().setColor(EMBED_COLOR).setTitle('⚠️ Most Warned Members').setDescription(lines.join('\n'));
@@ -358,25 +401,28 @@ cmd('warns', P.Flags.ModerateMembers, 'warns @user | warns leaderboard', 'Show w
   }
   const id = parseUserId(args.shift());
   if (!id) return fail(m, 'Usage: `warns @user` or `warns leaderboard`');
-  return say(m, `<@${id}> has ${getWarns(m.guild.id, id)} warn(s).`);
+  const list = getWarnList(m.guild.id, id);
+  if (!list.length) return say(m, `<@${id}> has no warns.`);
+  const lines = list.map((w, i) => `*Warn #${i + 1}* ${w.reason}${w.moderatorId ? ` — <@${w.moderatorId}>` : ''} (<t:${Math.floor(w.time / 1000)}:R>)`);
+  const embed = new EmbedBuilder().setColor(EMBED_COLOR).setTitle(`${BULLET_EMOJI} Warns`).setDescription(lines.join('\n'));
+  return m.channel.send({ embeds: [embed], allowedMentions: { parse: [] } });
 });
 
-cmd(['unwarn', 'removewarn', 'deletewarn'], P.Flags.ModerateMembers, 'unwarn @user [reason]', 'Remove one warn', async (m, args) => {
+cmd(['unwarn', 'removewarn', 'deletewarn'], P.Flags.ModerateMembers, 'unwarn @user [reason]', 'Remove the most recent warn', async (m, args) => {
   const id = parseUserId(args.shift());
   if (!id) return fail(m, 'Usage: `unwarn @user [reason]`');
   const reason = reasonFrom(args);
-  const current = getWarns(m.guild.id, id);
-  if (!current) return fail(m, 'That member has no warns.');
-  setWarns(m.guild.id, id, current - 1);
-  logAction(m.guild.id, 'Unwarn', id, m.author.id, `${reason} (Warns now: ${current - 1})`);
-  return sendModEmbed(m, { action: 'unwarned', target: `<@${id}>`, by: 'Warning removed by', moderator: `${m.author}`, reason: `${reason}\n*(Warns: #${current - 1})*` });
+  const remaining = removeLastWarn(m.guild.id, id);
+  if (remaining === null) return fail(m, 'That member has no warns.');
+  logAction(m.guild.id, 'Unwarn', id, m.author.id, `${reason} (Warns now: ${remaining})`);
+  return sendModEmbed(m, { action: 'unwarned', target: `<@${id}>`, by: 'Warning removed by', moderator: `${m.author}`, reason: `${reason}\n*(Warns: #${remaining})*` });
 });
 
 cmd(['clearwarns', 'resetwarns'], P.Flags.ModerateMembers, 'clearwarns @user [reason]', 'Clear all warns', async (m, args) => {
   const id = parseUserId(args.shift());
   if (!id) return fail(m, 'Usage: `clearwarns @user [reason]`');
   const reason = reasonFrom(args);
-  setWarns(m.guild.id, id, 0);
+  clearWarnsFn(m.guild.id, id);
   logAction(m.guild.id, 'Clearwarns', id, m.author.id, reason);
   return sendModEmbed(m, { action: 'had all warns cleared', target: `<@${id}>`, by: 'Cleared by', moderator: `${m.author}`, reason });
 });
@@ -431,12 +477,6 @@ cmd(['purge', 'clear'], P.Flags.ManageMessages, 'purge <1-100> [@user]', 'Delete
 });
 
 cmd('lock', P.Flags.ManageChannels, 'lock [reason]', 'Lock this channel', async (m, args) => {
-  const reason = reasonFrom(args);
-  await m.channel.permissionOverwrites.edit(m.guild.roles.everyone, { SendMessages: false }, { reason: `${m.author.tag}: ${reason}` });
-  return done(m, `${m.channel} is locked by ${m.author} | Reason: ${reason}`);
-});
-
-cmd('unlock', P.Flags.ManageChannels, 'unlock [reason]', 'Unlock this channel', async (m, args) => {
   const reason = reasonFrom(args);
   await m.channel.permissionOverwrites.edit(m.guild.roles.everyone, { SendMessages: null }, { reason: `${m.author.tag}: ${reason}` });
   return done(m, `${m.channel} is unlocked by ${m.author} | Reason: ${reason}`);
@@ -509,7 +549,7 @@ cmd('help', null, 'help', 'Show all commands', async (m) => {
         name: '📢 Warnings',
         value:
           `\`warn @user <reason>\` — Warn a member ${t}\n` +
-          `\`unwarn @user [reason]\` — Remove one warn ${t}\n` +
+          `\`unwarn @user [reason]\` — Remove most recent warn ${t}\n` +
           `\`clearwarns @user [reason]\` — Clear all warns ${t}\n` +
           `\`warns @user\` — View warning history ${t}\n` +
           `\`warns leaderboard\` — Top 5 most warned ${t}`,
