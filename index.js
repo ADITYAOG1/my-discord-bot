@@ -16,8 +16,8 @@ const {
 
 const PREFIX = '-';
 const EMBED_COLOR = 0x8a2be2;
-const BULLET_EMOJI = '<:112:1555866911378776144>';
-const FOOTER_EMOJI = '<:114:1555867064516874341>';
+const BULLET_EMOJI = '<a:112:1555866911378776144>';
+const FOOTER_EMOJI = '<a:114:1555867064516874341>';
 
 // Tiny web server so Render detects an open port (needed for Web Services).
 http
@@ -478,6 +478,12 @@ cmd(['purge', 'clear'], P.Flags.ManageMessages, 'purge <1-100> [@user]', 'Delete
 
 cmd('lock', P.Flags.ManageChannels, 'lock [reason]', 'Lock this channel', async (m, args) => {
   const reason = reasonFrom(args);
+  await m.channel.permissionOverwrites.edit(m.guild.roles.everyone, { SendMessages: false }, { reason: `${m.author.tag}: ${reason}` });
+  return done(m, `${m.channel} is locked by ${m.author} | Reason: ${reason}`);
+});
+
+cmd('unlock', P.Flags.ManageChannels, 'unlock [reason]', 'Unlock this channel', async (m, args) => {
+  const reason = reasonFrom(args);
   await m.channel.permissionOverwrites.edit(m.guild.roles.everyone, { SendMessages: null }, { reason: `${m.author.tag}: ${reason}` });
   return done(m, `${m.channel} is unlocked by ${m.author} | Reason: ${reason}`);
 });
@@ -684,4 +690,4 @@ if (!process.env.TOKEN) {
         console.error('FATAL: login failed —', err.message);
       });
   });
-}
+        }
